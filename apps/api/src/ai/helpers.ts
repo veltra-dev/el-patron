@@ -7,6 +7,15 @@ export const money = (v: number) => brl.format(v);
 
 const BILL_REMINDER_TIME = "09:00";
 
+/** "vence hoje", "vence amanhã", "vence em 5 dias", "venceu há 3 dias" — calculado aqui, não pelo modelo. */
+export function dueLabel(dueOn: string, today: string): string {
+  const days = Math.round((Date.parse(`${dueOn}T12:00:00Z`) - Date.parse(`${today}T12:00:00Z`)) / 86_400_000);
+  if (days === 0) return "vence hoje";
+  if (days === 1) return "vence amanhã";
+  if (days > 1) return `vence em ${days} dias`;
+  return days === -1 ? "venceu ontem" : `venceu há ${-days} dias`;
+}
+
 /** Lembrete às 9h do dia do vencimento. Não cria se esse horário já passou. */
 export async function createBillReminder(user: User, bill: Bill): Promise<string | null> {
   const when = localToIso(bill.due_on, BILL_REMINDER_TIME, user.timezone);
@@ -24,7 +33,7 @@ type Tx = { tipo: "despesa" | "receita"; valor: number; categoria: string; descr
 type Conta = { descricao: string; valor: number; vencimento: string };
 
 /** Resumo do rascunho para o modelo apresentar ao usuário. */
-export async function importSummary(userId: string, txs: Tx[], contas: Conta[]) {
+export async function importSummary(userId: string, txs: Tx[], contas: Conta[], today: string) {
   const despesas = txs.filter((t) => t.tipo === "despesa");
   const receitas = txs.filter((t) => t.tipo === "receita");
   const porCategoria: Record<string, number> = {};
@@ -57,7 +66,7 @@ export async function importSummary(userId: string, txs: Tx[], contas: Conta[]) 
       total: money(contas.reduce((s, c) => s + c.valor, 0)),
       itens: [...contas]
         .sort((a, b) => a.vencimento.localeCompare(b.vencimento))
-        .map((c) => ({ descricao: c.descricao, valor: money(c.valor), vencimento: c.vencimento })),
+        .map((c) => ({ descricao: c.descricao, valor: money(c.valor), vencimento: c.vencimento, situacao: dueLabel(c.vencimento, today) })),
     },
   };
 }

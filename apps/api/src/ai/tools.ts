@@ -11,7 +11,7 @@ import {
   listEvents,
 } from "../services/calendar.js";
 import { formatDateTime, localDate } from "../lib/time.js";
-import { createBillReminder, importSummary, money } from "./helpers.js";
+import { createBillReminder, dueLabel, importSummary, money } from "./helpers.js";
 
 const isoDateTime = z.iso.datetime({ offset: true }).describe("ISO 8601 com offset, ex.: 2026-11-10T15:00:00-03:00");
 const isoDate = z.iso.date().describe("Data YYYY-MM-DD");
@@ -247,8 +247,7 @@ export function buildTools(user: User) {
             descricao: b.description,
             valor: Number(b.amount),
             vencimento: b.due_on,
-            paga: Boolean(b.paid_at),
-            atrasada: !b.paid_at && b.due_on < today,
+            situacao: b.paid_at ? "paga" : dueLabel(b.due_on, today),
           })),
         });
       },
@@ -319,7 +318,7 @@ export function buildTools(user: User) {
       run: async (i) => {
         if (i.transacoes.length + i.contas.length === 0) return json({ ok: false, erro: "Nenhum item para importar" });
         await db.savePendingImport(user.id, i.nome_arquivo ?? null, { transacoes: i.transacoes, contas: i.contas });
-        return json({ ok: true, rascunho_salvo: true, ...(await importSummary(user.id, i.transacoes, i.contas)) });
+        return json({ ok: true, rascunho_salvo: true, ...(await importSummary(user.id, i.transacoes, i.contas, localDate(user.timezone))) });
       },
     }),
     betaZodTool({

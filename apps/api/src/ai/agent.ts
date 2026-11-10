@@ -146,7 +146,14 @@ export async function runAgent(user: User, userText: string, attachment?: Attach
     blocks = [...blocks, { role: "assistant", content: reply }];
   }
 
-  await saveMessage(user.id, "user", stamped);
+  // O conteúdo do arquivo não fica no histórico (seria reenviado a cada
+  // mensagem). Fica registrado que ele foi lido, para o modelo não achar, na
+  // próxima mensagem, que inventou os dados que extraiu dele.
+  const stored = attachment
+    ? `${stamped}\n(${attachment.kind === "pdf" ? "PDF" : `planilha, ${attachment.lines} linhas`} lido por completo nesta mensagem. ` +
+      "O conteúdo não é guardado no histórico; os dados extraídos dele estão nas chamadas de ferramenta da resposta a seguir.)"
+    : stamped;
+  await saveMessage(user.id, "user", stored);
   await saveMessage(user.id, "assistant", reply, blocks);
   return reply;
 }
