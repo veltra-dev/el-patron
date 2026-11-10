@@ -10,6 +10,8 @@ import { buildTools } from "./tools.js";
 
 const anthropic = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
 
+const FALLBACK_MODELS = new Set(["claude-fable-5-1", "claude-opus-5-5", "claude-opus-5", "claude-sonnet-5-5"]);
+
 type Msg = Anthropic.Beta.BetaMessageParam;
 type Block = Anthropic.Beta.BetaContentBlockParam;
 
@@ -112,9 +114,11 @@ export async function runAgent(user: User, userText: string, attachment?: Attach
     output_config: { effort: env.AI_EFFORT },
     cache_control: { type: "ephemeral" },
     // Se um classificador de segurança recusar por engano, a API refaz a
-    // requisição num modelo de fallback dentro da mesma chamada.
-    betas: ["server-side-fallback-2026-07-01"],
-    fallbacks: "default",
+    // requisição num modelo de fallback dentro da mesma chamada. Só alguns
+    // modelos aceitam (o Haiku, por exemplo, não).
+    ...(FALLBACK_MODELS.has(env.AI_MODEL)
+      ? { betas: ["server-side-fallback-2026-07-01"], fallbacks: "default" as const }
+      : {}),
     max_iterations: 10,
   });
   const final = await runner;
