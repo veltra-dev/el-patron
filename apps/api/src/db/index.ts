@@ -1,5 +1,5 @@
 import { createClient } from "@supabase/supabase-js";
-import type { ChatMessage, Note, Reminder, Transaction, TransactionKind, User } from "@elpatron/shared";
+import type { Bill, ChatMessage, Note, Recurrence, Reminder, Transaction, TransactionKind, User } from "@elpatron/shared";
 import { env } from "../config/env.js";
 
 export const db = createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY, {
@@ -14,6 +14,7 @@ function check<T>(res: { data: T | null; error: { message: string } | null }): T
 function rows<T>(res: { data: T[] | null; error: { message: string } | null }): T[] {
   return check(res) ?? [];
 }
+const rows_ = rows;
 
 // ---------- idempotência ----------
 
@@ -55,8 +56,8 @@ export async function recentMessages(userId: string, limit: number): Promise<Cha
   return list.reverse();
 }
 
-export async function saveMessage(userId: string, role: ChatMessage["role"], content: string) {
-  check(await db.from("chat_messages").insert({ user_id: userId, role, content }));
+export async function saveMessage(userId: string, role: ChatMessage["role"], content: string, blocks?: unknown[]) {
+  check(await db.from("chat_messages").insert({ user_id: userId, role, content, blocks: blocks ?? null }));
 }
 
 // ---------- finanças ----------
@@ -115,10 +116,15 @@ export async function deleteNote(userId: string, id: string): Promise<boolean> {
 
 // ---------- lembretes ----------
 
-export async function insertReminder(userId: string, message: string, remindAt: string): Promise<Reminder> {
-  return check(
-    await db.from("reminders").insert({ user_id: userId, message, remind_at: remindAt }).select().single<Reminder>(),
-  );
+export async function insertReminder(r: {
+  user_id: string;
+  message: string;
+  remind_at: string;
+  recurrence?: Recurrence | null;
+  recurrence_days?: number[] | null;
+  bill_id?: string | null;
+}): Promise<Reminder> {
+  return check(await db.from("reminders").insert(r).select().single<Reminder>());
 }
 
 export async function pendingReminders(userId: string): Promise<Reminder[]> {
@@ -140,6 +146,11 @@ export async function cancelReminder(userId: string, id: string): Promise<boolea
   return list.length > 0;
 }
 
+/** Reagenda um lembrete recorrente para a próxima ocorrência. */
+export async function rescheduleReminder(id: string, nextIso: string, sentAt: string) {
+  check(await db.from("reminders").update({ remind_at: nextIso, sent_at: null, last_sent_at: sentAt }).eq("id", id));
+}
+
 /** Marca como enviados os lembretes vencidos e os devolve (claim atômico por linha). */
 export async function claimDueReminders(): Promise<Reminder[]> {
   return rows(
@@ -151,4 +162,83 @@ export async function claimDueReminders(): Promise<Reminder[]> {
       .select()
       .returns<Reminder[]>(),
   );
+}
+
+// ---------- contas a pagar ----------
+
+export async function insertBills(
+  rows: { user_id: string; description: string; amount: number; category: string; due_on: string; source: Bill["source"] }[],
+): Promise<Bill[]> {
+  if (rows.length === 0) return [];
+  return rows_(await db.from("bills").insert(rows).select().returns<Bill[]>());
+}
+
+export async function listBills(userId: string, opts: { from?: string; to?: string; status?: "pendentes" | "pagas" | "todas" }): Promise<Bill[]> {
+  let q = db.from("bills").select("*").eq("user_id", userId).order("due_on");
+  if (opts.from) q = q.gte("due_on", opts.from);
+  if (opts.to) q = q.lte("due_on", opts.to);
+  if (opts.status === "pendentes") q = q.is("paid_at", null);
+  if (opts.status === "pagas") q = q.not("paid_at", "is", null);
+  return rows_(await q.returns<Bill[]>());
+}
+
+export async function getBill(userId: string, id: string): Promise<Bill | null> {
+  return check(await db.from("bills").select("*").eq("user_id", userId).eq("id", id).maybeSingle<Bill>());
+}
+
+export async function markBillPaid(userId: string, id: string, transactionId: string | null) {
+  check(
+    await db
+      .from("bills")
+      .update({ paid_at: new Date().toISOString(), transaction_id: transactionId })
+      .eq("user_id", userId)
+      .eq("id", id),
+  );
+  // o lembrete de vencimento deixa de fazer sentido
+  check(await db.from("reminders").delete().eq("bill_id", id).is("sent_at", null));
+}
+
+export async function deleteBill(userId: string, id: string): Promise<boolean> {
+  const list = rows(await db.from("bills").delete().eq("user_id", userId).eq("id", id).select("id"));
+  return list.length > 0;
+}
+
+// ---------- importações pendentes ----------
+
+export async function savePendingImport(userId: string, fileName: string | null, payload: unknown): Promise<string> {
+  // só uma importação pendente por vez
+  check(await db.from("pending_imports").delete().eq("user_id", userId));
+  const row = check(
+    await db.from("pending_imports").insert({ user_id: userId, file_name: fileName, payload }).select("id").single<{ id: string }>(),
+  );
+  return row.id;
+}
+
+export async function takePendingImport(userId: string, maxAgeHours = 24) {
+  const since = new Date(Date.now() - maxAgeHours * 3600_000).toISOString();
+  const row = check(
+    await db
+      .from("pending_imports")
+      .select("id, file_name, payload")
+      .eq("user_id", userId)
+      .gte("created_at", since)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle<{ id: string; file_name: string | null; payload: unknown }>(),
+  );
+  if (row) check(await db.from("pending_imports").delete().eq("id", row.id));
+  return row;
+}
+
+export async function discardPendingImport(userId: string): Promise<boolean> {
+  const list = rows(await db.from("pending_imports").delete().eq("user_id", userId).select("id"));
+  return list.length > 0;
+}
+
+export async function insertTransactions(
+  rows: { user_id: string; kind: TransactionKind; amount: number; category: string; description?: string; occurred_on: string }[],
+): Promise<number> {
+  if (rows.length === 0) return 0;
+  const list = rows_(await db.from("transactions").insert(rows).select("id"));
+  return list.length;
 }

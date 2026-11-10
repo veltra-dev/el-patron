@@ -1,5 +1,5 @@
 import { betaZodTool } from "@anthropic-ai/sdk/helpers/beta/zod";
-import { EXPENSE_CATEGORIES, type User } from "@elpatron/shared";
+import { EXPENSE_CATEGORIES, describeRecurrence, nextOccurrence, type User } from "@elpatron/shared";
 import { z } from "zod";
 import { googleEnabled } from "../config/env.js";
 import * as db from "../db/index.js";
@@ -11,6 +11,7 @@ import {
   listEvents,
 } from "../services/calendar.js";
 import { formatDateTime, localDate } from "../lib/time.js";
+import { createBillReminder, importSummary, money } from "./helpers.js";
 
 const isoDateTime = z.iso.datetime({ offset: true }).describe("ISO 8601 com offset, ex.: 2026-11-10T15:00:00-03:00");
 const isoDate = z.iso.date().describe("Data YYYY-MM-DD");
@@ -122,38 +123,267 @@ export function buildTools(user: User) {
   const reminders = [
     betaZodTool({
       name: "criar_lembrete",
-      description: "Agenda uma mensagem que o assistente vai mandar no WhatsApp do usuário no horário indicado.",
+      description:
+        "Agenda uma mensagem que o assistente manda no WhatsApp do usuário no horário indicado. " +
+        "Para lembretes que se repetem ('todo dia', 'dias úteis', 'toda segunda', 'todo dia 10'), preencha `repetir`; " +
+        "sem `repetir`, o lembrete dispara uma única vez.",
       inputSchema: z.object({
-        mensagem: z.string().min(1).describe("Texto do lembrete, ex.: 'Pagar a conta de luz'"),
-        quando: isoDateTime,
+        mensagem: z.string().min(1).describe("Texto do lembrete, ex.: 'Reunião da T10'"),
+        quando: isoDateTime.describe(
+          "Primeira ocorrência, ISO 8601 com offset. Para recorrentes, o horário daqui vale para todas as repetições.",
+        ),
+        repetir: z
+          .enum(["diario", "dias_uteis", "semanal", "mensal"])
+          .optional()
+          .describe("diario = todo dia; dias_uteis = segunda a sexta; semanal = dias em `dias_semana`; mensal = mesmo dia do mês de `quando`"),
+        dias_semana: z
+          .array(z.number().int().min(0).max(6))
+          .optional()
+          .describe("Só para semanal: 0 = domingo, 1 = segunda … 6 = sábado"),
       }),
       run: async (i) => {
         const when = new Date(i.quando);
-        if (when.getTime() < Date.now() - 60_000) {
-          return json({ ok: false, erro: "Horário no passado" });
+        if (!i.repetir) {
+          if (when.getTime() < Date.now() - 60_000) return json({ ok: false, erro: "Horário no passado" });
+          const r = await db.insertReminder({ user_id: user.id, message: i.mensagem, remind_at: when.toISOString() });
+          return json({ ok: true, id: r.id, quando: formatDateTime(r.remind_at, user.timezone), repete: false });
         }
-        const r = await db.insertReminder(user.id, i.mensagem, when.toISOString());
-        return json({ ok: true, id: r.id, quando: formatDateTime(r.remind_at, user.timezone) });
+
+        let days: number[] | null = null;
+        if (i.repetir === "semanal") {
+          if (!i.dias_semana?.length) return json({ ok: false, erro: "Informe dias_semana para lembrete semanal" });
+          days = [...new Set(i.dias_semana)].sort();
+        } else if (i.repetir === "mensal") {
+          days = [Number(localDate(user.timezone, when).slice(8, 10))];
+        }
+        // primeira ocorrência válida a partir de `quando` (ou de agora, se `quando` já passou)
+        const after = new Date(Math.max(Date.now(), when.getTime() - 1000));
+        const first = nextOccurrence(when.toISOString(), i.repetir, days, user.timezone, after);
+        const r = await db.insertReminder({
+          user_id: user.id,
+          message: i.mensagem,
+          remind_at: first,
+          recurrence: i.repetir,
+          recurrence_days: days,
+        });
+        return json({
+          ok: true,
+          id: r.id,
+          repete: describeRecurrence(r, user.timezone),
+          primeira_vez: formatDateTime(r.remind_at, user.timezone),
+        });
       },
     }),
     betaZodTool({
       name: "listar_lembretes",
-      description: "Lista os lembretes pendentes.",
+      description: "Lista os lembretes ativos (únicos pendentes e recorrentes).",
       inputSchema: z.object({}),
       run: async () => {
         const rows = await db.pendingReminders(user.id);
-        return json(rows.map((r) => ({ id: r.id, mensagem: r.message, quando: formatDateTime(r.remind_at, user.timezone) })));
+        return json(
+          rows.map((r) => ({
+            id: r.id,
+            mensagem: r.message,
+            proxima_vez: formatDateTime(r.remind_at, user.timezone),
+            repete: describeRecurrence(r, user.timezone) ?? "não (lembrete único)",
+          })),
+        );
       },
     }),
     betaZodTool({
       name: "cancelar_lembrete",
-      description: "Cancela um lembrete pendente pelo id.",
+      description: "Cancela um lembrete pelo id. Para recorrentes, para todas as repetições futuras.",
       inputSchema: z.object({ id: z.uuid() }),
       run: async (i) => json({ ok: await db.cancelReminder(user.id, i.id) }),
     }),
   ];
 
-  if (!googleEnabled) return [...finance, ...notes, ...reminders];
+  const bills = [
+    betaZodTool({
+      name: "registrar_conta_a_pagar",
+      description:
+        "Registra uma conta que ainda vai vencer (boleto, fatura, aluguel). Diferente de registrar_transacao, que é para gasto já feito. " +
+        "Por padrão o assistente avisa no WhatsApp às 9h do dia do vencimento.",
+      inputSchema: z.object({
+        descricao: z.string().min(1),
+        valor: z.number().positive(),
+        vencimento: isoDate,
+        categoria: z.enum(EXPENSE_CATEGORIES).optional().describe("Padrão: contas"),
+        lembrar_no_vencimento: z.boolean().optional().describe("Padrão: true"),
+      }),
+      run: async (i) => {
+        const [bill] = await db.insertBills([
+          {
+            user_id: user.id,
+            description: i.descricao,
+            amount: Math.round(i.valor * 100) / 100,
+            category: i.categoria ?? "contas",
+            due_on: i.vencimento,
+            source: "whatsapp",
+          },
+        ]);
+        const lembrete = i.lembrar_no_vencimento === false ? null : await createBillReminder(user, bill!);
+        return json({ ok: true, id: bill!.id, lembrete_no_vencimento: lembrete });
+      },
+    }),
+    betaZodTool({
+      name: "listar_contas",
+      description: "Lista contas a pagar num período (por vencimento). Use para 'o que vence esse mês?', 'tenho conta atrasada?'.",
+      inputSchema: z.object({
+        status: z.enum(["pendentes", "pagas", "todas"]).optional().describe("Padrão: pendentes"),
+        inicio: isoDate.optional(),
+        fim: isoDate.optional(),
+      }),
+      run: async (i) => {
+        const rows = await db.listBills(user.id, { from: i.inicio, to: i.fim, status: i.status ?? "pendentes" });
+        const today = localDate(user.timezone);
+        const pend = rows.filter((b) => !b.paid_at);
+        return json({
+          hoje: today,
+          total_pendente: pend.reduce((s, b) => s + Number(b.amount), 0),
+          atrasadas: pend.filter((b) => b.due_on < today).length,
+          contas: rows.map((b) => ({
+            id: b.id,
+            descricao: b.description,
+            valor: Number(b.amount),
+            vencimento: b.due_on,
+            paga: Boolean(b.paid_at),
+            atrasada: !b.paid_at && b.due_on < today,
+          })),
+        });
+      },
+    }),
+    betaZodTool({
+      name: "marcar_conta_paga",
+      description:
+        "Marca uma conta como paga. Por padrão também registra o pagamento como despesa de hoje (para entrar nos relatórios de gastos).",
+      inputSchema: z.object({
+        id: z.uuid(),
+        registrar_como_gasto: z.boolean().optional().describe("Padrão: true"),
+        valor_pago: z.number().positive().optional().describe("Se pagou valor diferente do previsto"),
+      }),
+      run: async (i) => {
+        const bill = await db.getBill(user.id, i.id);
+        if (!bill) return json({ ok: false, erro: "Conta não encontrada" });
+        if (bill.paid_at) return json({ ok: false, erro: "Essa conta já estava paga" });
+        let txId: string | null = null;
+        if (i.registrar_como_gasto !== false) {
+          const t = await db.insertTransaction({
+            user_id: user.id,
+            kind: "despesa",
+            amount: i.valor_pago ?? Number(bill.amount),
+            category: bill.category,
+            description: bill.description,
+            occurred_on: localDate(user.timezone),
+          });
+          txId = t.id;
+        }
+        await db.markBillPaid(user.id, bill.id, txId);
+        return json({ ok: true, registrado_como_gasto: Boolean(txId) });
+      },
+    }),
+    betaZodTool({
+      name: "remover_conta",
+      description: "Apaga uma conta a pagar (cadastrada errado, cancelada).",
+      inputSchema: z.object({ id: z.uuid() }),
+      run: async (i) => json({ ok: await db.deleteBill(user.id, i.id) }),
+    }),
+  ];
+
+  const importItemTx = z.object({
+    tipo: z.enum(["despesa", "receita"]),
+    valor: z.number().positive(),
+    categoria: z.enum(EXPENSE_CATEGORIES),
+    descricao: z.string(),
+    data: isoDate,
+  });
+  const importItemBill = z.object({
+    descricao: z.string(),
+    valor: z.number().positive(),
+    vencimento: isoDate,
+    categoria: z.enum(EXPENSE_CATEGORIES).optional(),
+  });
+
+  const imports = [
+    betaZodTool({
+      name: "preparar_importacao",
+      description:
+        "Use quando o usuário mandar um arquivo (planilha/PDF) com gastos ou contas. Guarda os itens extraídos como RASCUNHO " +
+        "(nada é salvo ainda) e devolve um resumo, que você mostra ao usuário pedindo confirmação. " +
+        "`transacoes` = gastos/receitas que já aconteceram; `contas` = contas que ainda vão vencer.",
+      inputSchema: z.object({
+        transacoes: z.array(importItemTx),
+        contas: z.array(importItemBill),
+        nome_arquivo: z.string().optional(),
+      }),
+      run: async (i) => {
+        if (i.transacoes.length + i.contas.length === 0) return json({ ok: false, erro: "Nenhum item para importar" });
+        await db.savePendingImport(user.id, i.nome_arquivo ?? null, { transacoes: i.transacoes, contas: i.contas });
+        return json({ ok: true, rascunho_salvo: true, ...(await importSummary(user.id, i.transacoes, i.contas)) });
+      },
+    }),
+    betaZodTool({
+      name: "confirmar_importacao",
+      description: "Salva de verdade o último rascunho de importação, depois que o usuário confirmou.",
+      inputSchema: z.object({
+        ignorar_duplicados: z
+          .boolean()
+          .optional()
+          .describe("true = pula transações que parecem já existir (mesma data e valor). Padrão: true"),
+      }),
+      run: async (i) => {
+        const pending = await db.takePendingImport(user.id);
+        if (!pending) return json({ ok: false, erro: "Não há importação aguardando confirmação (ou passou de 24h)." });
+        const payload = pending.payload as { transacoes: z.infer<typeof importItemTx>[]; contas: z.infer<typeof importItemBill>[] };
+
+        let txs = payload.transacoes;
+        if (i.ignorar_duplicados !== false && txs.length) {
+          const dates = txs.map((t) => t.data).sort();
+          const existing = await db.listTransactions(user.id, dates[0]!, dates.at(-1)!);
+          const seen = new Set(existing.map((e) => `${e.occurred_on}|${Number(e.amount).toFixed(2)}`));
+          txs = txs.filter((t) => !seen.has(`${t.data}|${t.valor.toFixed(2)}`));
+        }
+        const inserted = await db.insertTransactions(
+          txs.map((t) => ({
+            user_id: user.id,
+            kind: t.tipo,
+            amount: Math.round(t.valor * 100) / 100,
+            category: t.categoria,
+            description: t.descricao,
+            occurred_on: t.data,
+          })),
+        );
+        const billRows = await db.insertBills(
+          payload.contas.map((c) => ({
+            user_id: user.id,
+            description: c.descricao,
+            amount: Math.round(c.valor * 100) / 100,
+            category: c.categoria ?? "contas",
+            due_on: c.vencimento,
+            source: "importacao" as const,
+          })),
+        );
+        let reminders = 0;
+        for (const b of billRows) if (await createBillReminder(user, b)) reminders++;
+        return json({
+          ok: true,
+          transacoes_salvas: inserted,
+          duplicadas_ignoradas: payload.transacoes.length - txs.length,
+          contas_salvas: billRows.length,
+          lembretes_de_vencimento: reminders,
+          total_contas: money(billRows.reduce((s, b) => s + Number(b.amount), 0)),
+        });
+      },
+    }),
+    betaZodTool({
+      name: "cancelar_importacao",
+      description: "Descarta o rascunho de importação quando o usuário não quer salvar.",
+      inputSchema: z.object({}),
+      run: async () => json({ ok: await db.discardPendingImport(user.id) }),
+    }),
+  ];
+
+  if (!googleEnabled) return [...finance, ...notes, ...reminders, ...bills, ...imports];
 
   const notConnected = () =>
     json({ ok: false, erro: "Agenda do Google não conectada. Ofereça o link usando a ferramenta conectar_agenda." });
@@ -214,5 +444,5 @@ export function buildTools(user: User) {
     }),
   ];
 
-  return [...finance, ...notes, ...reminders, ...calendar];
+  return [...finance, ...notes, ...reminders, ...bills, ...imports, ...calendar];
 }

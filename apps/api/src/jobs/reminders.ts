@@ -1,4 +1,5 @@
-import { claimDueReminders, getUser, saveMessage } from "../db/index.js";
+import { nextOccurrence } from "@elpatron/shared";
+import { claimDueReminders, getUser, rescheduleReminder, saveMessage } from "../db/index.js";
 import { logger } from "../lib/logger.js";
 import { whatsapp } from "../whatsapp/evolution.js";
 
@@ -11,7 +12,12 @@ async function tick() {
       const user = await getUser(r.user_id);
       const to = user?.wa_number ?? user?.phone;
       if (!user || !to) continue;
-      const text = `⏰ *Lembrete:* ${r.message}`;
+      // Recorrente: reagenda antes de enviar, para não repetir se o envio falhar no meio.
+      if (r.recurrence) {
+        const next = nextOccurrence(r.remind_at, r.recurrence, r.recurrence_days, user.timezone);
+        await rescheduleReminder(r.id, next, new Date().toISOString());
+      }
+      const text = r.bill_id ? r.message : `⏰ *Lembrete:* ${r.message}`;
       await whatsapp.sendText(to, text);
       // Entra no histórico para a IA saber que o lembrete foi enviado.
       await saveMessage(user.id, "assistant", text);

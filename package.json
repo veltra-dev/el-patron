@@ -11,7 +11,8 @@
     "build": "pnpm -r build",
     "typecheck": "pnpm -r typecheck",
     "evolution:setup": "pnpm --filter @elpatron/api evolution:setup",
-    "db:migrate": "tsx --env-file=apps/api/.env scripts/migrate.ts"
+    "db:migrate": "tsx --env-file=apps/api/.env scripts/migrate.ts",
+    "dev:web": "pnpm --filter @elpatron/web dev"
   },
   "devDependencies": {
     "postgres": "^4.1.0",

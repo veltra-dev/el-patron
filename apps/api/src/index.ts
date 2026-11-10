@@ -14,11 +14,12 @@ const app = Fastify({ loggerInstance: logger, bodyLimit: 30 * 1024 * 1024 });
 
 app.get("/health", async () => ({ ok: true }));
 
-function sameSecret(given: string) {
+function safeEqual(given: string, expected: string) {
   const a = Buffer.from(given);
-  const b = Buffer.from(env.WEBHOOK_SECRET);
+  const b = Buffer.from(expected);
   return a.length === b.length && timingSafeEqual(a, b);
 }
+const sameSecret = (given: string) => safeEqual(given, env.WEBHOOK_SECRET);
 
 app.post<{ Params: { secret: string } }>("/webhook/evolution/:secret", async (req, reply) => {
   if (!sameSecret(req.params.secret)) return reply.code(401).send();
@@ -26,6 +27,22 @@ app.post<{ Params: { secret: string } }>("/webhook/evolution/:secret", async (re
   for (const msg of whatsapp.parseWebhook(req.body)) enqueueIncoming(msg);
   return { received: true };
 });
+
+// Usado pelo painel web para mandar mensagens (ex.: código de login) pelo
+// mesmo canal do bot, sem o web precisar conhecer a Evolution.
+if (env.INTERNAL_API_SECRET) {
+  const internalSecret = env.INTERNAL_API_SECRET;
+  app.post<{ Body: { userId?: string; text?: string } }>("/internal/send-message", async (req, reply) => {
+    const given = req.headers["x-internal-secret"];
+    if (typeof given !== "string" || !safeEqual(given, internalSecret)) return reply.code(401).send();
+    const { userId, text } = req.body ?? {};
+    if (!userId || !text) return reply.code(400).send({ error: "userId e text são obrigatórios" });
+    const user = await getUser(userId);
+    if (!user) return reply.code(404).send({ error: "usuário não encontrado" });
+    await whatsapp.sendText(user.wa_number ?? user.phone, text);
+    return { sent: true };
+  });
+}
 
 const page = (msg: string) =>
   `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width"><body style="font-family:system-ui;padding:2rem;text-align:center"><h2>${msg}</h2></body>`;

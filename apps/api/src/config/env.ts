@@ -32,6 +32,10 @@ const schema = z.object({
   GOOGLE_CLIENT_ID: z.string().optional(),
   GOOGLE_CLIENT_SECRET: z.string().optional(),
 
+  // Segredo compartilhado com o painel web (apps/web) para o endpoint interno.
+  // Sem ele, o endpoint /internal/send-message fica desligado.
+  INTERNAL_API_SECRET: z.string().min(24).optional(),
+
   // 32 bytes em base64: `openssl rand -base64 32`
   ENCRYPTION_KEY: z
     .string()

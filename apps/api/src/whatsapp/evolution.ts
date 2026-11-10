@@ -17,8 +17,20 @@ interface EvolutionMessageData {
     conversation?: string;
     extendedTextMessage?: { text?: string };
     audioMessage?: { mimetype?: string };
+    documentMessage?: EvolutionDocument;
+    documentWithCaptionMessage?: { message?: { documentMessage?: EvolutionDocument } };
     base64?: string;
   };
+}
+
+interface EvolutionDocument {
+  fileName?: string;
+  mimetype?: string;
+  caption?: string;
+}
+
+function documentOf(d: EvolutionMessageData): EvolutionDocument | undefined {
+  return d.message?.documentMessage ?? d.message?.documentWithCaptionMessage?.message?.documentMessage;
 }
 
 function jidToNumber(jid: string): string {
@@ -65,8 +77,9 @@ export class EvolutionProvider implements WhatsAppProvider {
       }
 
       const m = d.message ?? {};
-      const text = m.conversation ?? m.extendedTextMessage?.text;
-      const kind: IncomingMessage["kind"] = m.audioMessage ? "audio" : text ? "text" : "unsupported";
+      const doc = documentOf(d);
+      const text = m.conversation ?? m.extendedTextMessage?.text ?? doc?.caption;
+      const kind: IncomingMessage["kind"] = m.audioMessage ? "audio" : doc ? "document" : text ? "text" : "unsupported";
 
       out.push({
         id: key.id,
@@ -74,6 +87,8 @@ export class EvolutionProvider implements WhatsAppProvider {
         pushName: d.pushName,
         kind,
         text: text ?? undefined,
+        fileName: doc?.fileName,
+        mimetype: doc?.mimetype,
         raw: d,
       });
     }
@@ -84,9 +99,9 @@ export class EvolutionProvider implements WhatsAppProvider {
     await this.call(`/message/sendText/${this.instance}`, { number: to, text });
   }
 
-  async downloadAudio(msg: IncomingMessage): Promise<{ data: Buffer; mimetype: string }> {
+  async downloadMedia(msg: IncomingMessage): Promise<{ data: Buffer; mimetype: string }> {
     const d = msg.raw as EvolutionMessageData;
-    const mimetype = d.message?.audioMessage?.mimetype ?? "audio/ogg";
+    const mimetype = d.message?.audioMessage?.mimetype ?? documentOf(d)?.mimetype ?? "application/octet-stream";
 
     // Se o webhook foi configurado com base64 ligado, a mídia já vem no payload.
     if (d.message?.base64) {

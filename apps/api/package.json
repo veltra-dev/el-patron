@@ -12,9 +12,10 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^1.6.0",
-    "@googleapis/calendar": "^20.1.0",
     "@elpatron/shared": "workspace:*",
+    "@googleapis/calendar": "^20.1.0",
     "@supabase/supabase-js": "^2.119.0",
+    "exceljs": "^4.4.0",
     "fastify": "^5.12.8",
     "openai": "^7.54.0",
     "pino": "^10.4.0",

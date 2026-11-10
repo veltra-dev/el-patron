@@ -1,0 +1,125 @@
+@import "tailwindcss";
+
+/* Tokens. Cores de série vêm da paleta validada (skill dataviz):
+   slot 1 azul, slot 2 laranja, com valores próprios para o modo escuro. */
+:root {
+  color-scheme: light;
+  --bg: #f6f5f2;
+  --surface: #fcfcfb;
+  --surface-2: #f0efec;
+  --border: #e4e2dc;
+  --text-primary: #0b0b0b;
+  --text-secondary: #52514e;
+  --text-muted: #7a7974;
+  --brand: #b07400;
+  --brand-ink: #ffffff;
+  --btn: #1a1a19;
+  --btn-ink: #fcfcfb;
+  --series-1: #2a78d6;
+  --series-2: #eb6834;
+  --track: #ecebe7;
+  --grid: #e9e8e3;
+  --good-text: #006300;
+  --critical-text: #b42727;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg: #111110;
+    --surface: #1a1a19;
+    --surface-2: #232321;
+    --border: #2e2e2b;
+    --text-primary: #f0efec;
+    --text-secondary: #c3c2b7;
+    --text-muted: #8f8e86;
+    --brand: #e0a82e;
+    --brand-ink: #1a1a19;
+    --btn: #f0efec;
+    --btn-ink: #1a1a19;
+    --series-1: #3987e5;
+    --series-2: #d95926;
+    --track: #262624;
+    --grid: #2a2a27;
+    --good-text: #4cc24c;
+    --critical-text: #f07272;
+  }
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #111110;
+  --surface: #1a1a19;
+  --surface-2: #232321;
+  --border: #2e2e2b;
+  --text-primary: #f0efec;
+  --text-secondary: #c3c2b7;
+  --text-muted: #8f8e86;
+  --brand: #e0a82e;
+  --brand-ink: #1a1a19;
+  --btn: #f0efec;
+  --btn-ink: #1a1a19;
+  --series-1: #3987e5;
+  --series-2: #d95926;
+  --track: #262624;
+  --grid: #2a2a27;
+  --good-text: #4cc24c;
+  --critical-text: #f07272;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text-primary);
+  font-family: var(--font-sans), system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+@layer components {
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 1rem;
+  }
+  .input {
+    width: 100%;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 0.75rem;
+    padding: 0.7rem 0.9rem;
+    outline: none;
+    transition: border-color 0.15s, box-shadow 0.15s;
+  }
+  .input:focus {
+    border-color: var(--brand);
+    box-shadow: 0 0 0 3px color-mix(in oklab, var(--brand) 25%, transparent);
+  }
+  .btn-primary {
+    background: var(--btn);
+    color: var(--btn-ink);
+    border-radius: 0.75rem;
+    padding: 0.75rem 1rem;
+    font-weight: 600;
+    transition: opacity 0.15s;
+  }
+  .btn-primary:disabled {
+    opacity: 0.6;
+  }
+  .btn-ghost {
+    border: 1px solid var(--border);
+    border-radius: 0.6rem;
+    padding: 0.35rem 0.7rem;
+    font-size: 0.875rem;
+    color: var(--text-secondary);
+  }
+  .btn-ghost:hover {
+    background: var(--surface-2);
+  }
+  .link {
+    color: var(--text-secondary);
+    text-decoration: underline;
+    text-underline-offset: 3px;
+  }
+  .num {
+    font-variant-numeric: tabular-nums;
+  }
+}

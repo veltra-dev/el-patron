@@ -1,11 +1,6 @@
-/** Offset do fuso no instante dado, ex.: "-03:00". */
-export function tzOffset(timeZone: string, date = new Date()): string {
-  const part = new Intl.DateTimeFormat("en-US", { timeZone, timeZoneName: "longOffset" })
-    .formatToParts(date)
-    .find((p) => p.type === "timeZoneName")?.value;
-  const m = part?.match(/GMT([+-]\d{2}:\d{2})/);
-  return m?.[1] ?? "+00:00";
-}
+import { tzOffset } from "@elpatron/shared";
+
+export { tzOffset };
 
 /** Data local (YYYY-MM-DD) no fuso informado. */
 export function localDate(timeZone: string, date = new Date()): string {

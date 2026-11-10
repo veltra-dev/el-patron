@@ -15,7 +15,7 @@ WhatsApp ⇄ Evolution API ──webhook──▶ apps/api (Fastify)
 
 ```
 apps/api            API do bot (Render)
-apps/web            (futuro) painel web em Next.js (Vercel)
+apps/web            painel web em Next.js (Vercel): login por código no WhatsApp
 packages/shared     tipos e constantes usados pela API e pelo web
 supabase/           migrations e seed
 infra/              docker-compose da Evolution para dev local
@@ -33,6 +33,9 @@ da Meta, implemente outro `WhatsAppProvider` e troque o export em `evolution.ts`
 | "quanto gastei esse mês?", "gastos com mercado em outubro" | `consultar_transacoes` |
 | "anota: ideia de presente pra mãe…", "o que eu anotei sobre o carro?" | `salvar_nota` / `buscar_notas` |
 | "me lembra de pagar a luz amanhã às 9" | `criar_lembrete` (enviado pelo scheduler) |
+| "me lembra todo dia útil às 9h da reunião" | `criar_lembrete` com `repetir` (diário, dias úteis, semanal, mensal) |
+| "conta de luz de 180 vence dia 15", "paguei a luz" | `registrar_conta_a_pagar` / `marcar_conta_paga` (avisa às 9h do vencimento) |
+| planilha (.xlsx, .csv) ou PDF (extrato, fatura, boleto) | `preparar_importacao` → resumo → "sim" → `confirmar_importacao` |
 | "o que tenho na agenda amanhã?", "marca dentista sexta 14h" | `agenda_*` |
 | áudio próprio ou encaminhado | transcreve e trata como mensagem / resume |
 
@@ -64,6 +67,15 @@ docker compose --env-file apps/api/.env -f infra/docker-compose.yml up -d  # Evo
 
 > Use plano pago (Starter) nos dois serviços. No free o serviço dorme: a Evolution
 > perde a conexão com o WhatsApp e os lembretes atrasam.
+
+## Painel web (Vercel)
+
+`pnpm dev:web` → http://localhost:3001. Login: o usuário digita o número e recebe um código
+de 6 dígitos no WhatsApp (enviado pela API via `/internal/send-message`).
+
+Na Vercel: *Add New → Project* → este repo → **Root Directory `apps/web`**. Variáveis (ver
+`apps/web/.env.example`): `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `API_URL`,
+`INTERNAL_API_SECRET` (mesmo valor da API no Render) e `SESSION_SECRET`.
 
 ## Google Agenda
 

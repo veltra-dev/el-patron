@@ -1,7 +1,8 @@
 import { runAgent } from "../ai/agent.js";
 import { claimMessage, findUserByPhone, updateUser } from "../db/index.js";
 import { logger } from "../lib/logger.js";
-import { normalizePhone } from "../lib/phone.js";
+import { normalizePhone } from "@elpatron/shared";
+import { readAttachment, UnsupportedFileError, type Attachment } from "../services/files.js";
 import { transcribe } from "../services/transcription.js";
 import type { IncomingMessage } from "../whatsapp/types.js";
 import { whatsapp } from "../whatsapp/evolution.js";
@@ -33,24 +34,39 @@ async function handleIncoming(msg: IncomingMessage) {
 
   try {
     let text: string;
+    let attachment: Attachment | undefined;
     if (msg.kind === "audio") {
       await whatsapp.sendPresence(msg.from, "composing");
-      const audio = await whatsapp.downloadAudio(msg);
+      const audio = await whatsapp.downloadMedia(msg);
       const transcript = await transcribe(audio.data, audio.mimetype);
       if (!transcript) {
         await whatsapp.sendText(msg.from, "Não consegui entender esse áudio 😕");
         return;
       }
       text = `[Áudio transcrito]: ${transcript}`;
+    } else if (msg.kind === "document") {
+      await whatsapp.sendPresence(msg.from, "composing");
+      const fileName = msg.fileName ?? "arquivo";
+      try {
+        const file = await whatsapp.downloadMedia(msg);
+        attachment = await readAttachment(fileName, msg.mimetype ?? file.mimetype, file.data);
+      } catch (err) {
+        if (err instanceof UnsupportedFileError) {
+          await whatsapp.sendText(msg.from, err.message);
+          return;
+        }
+        throw err;
+      }
+      text = `[Arquivo enviado: ${fileName}]${msg.text ? `\n${msg.text}` : ""}`;
     } else if (msg.kind === "text" && msg.text) {
       text = msg.text;
     } else {
-      await whatsapp.sendText(msg.from, "Por enquanto eu entendo mensagens de texto e áudio 🙂");
+      await whatsapp.sendText(msg.from, "Por enquanto eu entendo texto, áudio, planilhas (.xlsx, .csv) e PDF 🙂");
       return;
     }
 
     await whatsapp.sendPresence(msg.from, "composing");
-    const reply = await runAgent(user, text);
+    const reply = await runAgent(user, text, attachment);
     await whatsapp.sendText(msg.from, reply);
   } catch (err) {
     logger.error({ err, msgId: msg.id }, "falha no fluxo da mensagem");
