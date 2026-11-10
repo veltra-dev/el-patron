@@ -242,3 +242,35 @@ export async function insertTransactions(
   const list = rows_(await db.from("transactions").insert(rows).select("id"));
   return list.length;
 }
+
+// ---------- números fora da whitelist ----------
+
+/**
+ * Registra a mensagem de um número desconhecido e diz se devemos responder
+ * o aviso agora (primeira vez, ou passou `cooldownDays` desde o último aviso).
+ */
+export async function trackUnknownContact(phone: string, pushName: string | undefined, cooldownDays: number): Promise<boolean> {
+  const now = new Date();
+  const existing = check(
+    await db
+      .from("unknown_contacts")
+      .select("message_count, last_replied_at")
+      .eq("phone", phone)
+      .maybeSingle<{ message_count: number; last_replied_at: string | null }>(),
+  );
+  const shouldReply =
+    !existing?.last_replied_at || now.getTime() - new Date(existing.last_replied_at).getTime() > cooldownDays * 86_400_000;
+  check(
+    await db.from("unknown_contacts").upsert(
+      {
+        phone,
+        push_name: pushName ?? null,
+        message_count: (existing?.message_count ?? 0) + 1,
+        last_seen_at: now.toISOString(),
+        ...(shouldReply ? { last_replied_at: now.toISOString() } : {}),
+      },
+      { onConflict: "phone" },
+    ),
+  );
+  return shouldReply;
+}

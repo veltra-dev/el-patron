@@ -1,5 +1,6 @@
 import { runAgent } from "../ai/agent.js";
-import { claimMessage, findUserByPhone, updateUser } from "../db/index.js";
+import { claimMessage, findUserByPhone, trackUnknownContact, updateUser } from "../db/index.js";
+import { env } from "../config/env.js";
 import { logger } from "../lib/logger.js";
 import { normalizePhone } from "@elpatron/shared";
 import { readAttachment, UnsupportedFileError, type Attachment } from "../services/files.js";
@@ -25,7 +26,7 @@ export function enqueueIncoming(msg: IncomingMessage) {
 async function handleIncoming(msg: IncomingMessage) {
   const user = await findUserByPhone(normalizePhone(msg.from));
   if (!user) {
-    logger.info({ from: msg.from }, "número fora da whitelist; ignorando");
+    await handleUnknown(msg);
     return;
   }
   if (!(await claimMessage(msg.id))) return; // já processada
@@ -74,4 +75,20 @@ async function handleIncoming(msg: IncomingMessage) {
       .sendText(msg.from, "Tive um problema para processar isso agora. Tenta de novo em instantes? 🙏")
       .catch(() => {});
   }
+}
+
+function notClientMessage(pushName?: string) {
+  const firstName = pushName?.trim().split(/\s+/)[0];
+  const support = env.SUPPORT_CONTACT ? `, é só falar com o suporte: ${env.SUPPORT_CONTACT}` : ", é só falar com o suporte";
+  return (
+    `Olá${firstName ? `, ${firstName}` : ""}! 👋 Aqui é o *ElPatrón*, um assistente no WhatsApp que organiza gastos, contas e lembretes.\n\n` +
+    `Infelizmente o seu número ainda não está na minha lista de clientes. Se quiser contratar${support} 🤠`
+  );
+}
+
+async function handleUnknown(msg: IncomingMessage) {
+  const phone = normalizePhone(msg.from);
+  const reply = await trackUnknownContact(phone, msg.pushName, env.UNKNOWN_REPLY_COOLDOWN_DAYS);
+  logger.info({ from: msg.from, replied: reply }, "número fora da whitelist");
+  if (reply) await whatsapp.sendText(msg.from, notClientMessage(msg.pushName));
 }

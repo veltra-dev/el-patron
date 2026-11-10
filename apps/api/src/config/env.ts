@@ -28,6 +28,12 @@ const schema = z.object({
   // Segredo que vai na URL do webhook, para ninguém além da Evolution chamar.
   WEBHOOK_SECRET: z.string().min(16),
 
+  // Contato do suporte mostrado para números que não são clientes
+  // (ex.: "(16) 99999-9999" ou "https://wa.me/5516999999999"). Opcional.
+  SUPPORT_CONTACT: z.string().optional(),
+  // De quantos em quantos dias o aviso de "não é cliente" pode se repetir para o mesmo número.
+  UNKNOWN_REPLY_COOLDOWN_DAYS: z.coerce.number().min(0).default(7),
+
   // Google Calendar (opcional: sem isso as ferramentas de agenda ficam desligadas)
   GOOGLE_CLIENT_ID: z.string().optional(),
   GOOGLE_CLIENT_SECRET: z.string().optional(),
