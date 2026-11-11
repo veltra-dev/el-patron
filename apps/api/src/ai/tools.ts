@@ -11,7 +11,8 @@ import {
   listEvents,
 } from "../services/calendar.js";
 import { formatDateTime, localDate } from "../lib/time.js";
-import { createBillReminder, dueLabel, importSummary, money } from "./helpers.js";
+import { budgetAlert, createBillReminder, dueLabel, importSummary, money } from "./helpers.js";
+import { moduleTools } from "./tools-modules.js";
 
 const isoDateTime = z.iso.datetime({ offset: true }).describe("ISO 8601 com offset, ex.: 2026-11-10T15:00:00-03:00");
 const isoDate = z.iso.date().describe("Data YYYY-MM-DD");
@@ -32,6 +33,10 @@ export function buildTools(user: User) {
         categoria: z.enum(EXPENSE_CATEGORIES),
         descricao: z.string().optional().describe("Ex.: 'ifood', 'conta de luz'"),
         data: isoDate.optional().describe("Data da transação; padrão hoje"),
+        compartilhada: z
+          .boolean()
+          .optional()
+          .describe("Modo casal: true se o gasto é dividido 50/50 com o parceiro(a) (ex.: 'mercado da casa, divide com a Lais')"),
       }),
       run: async (i) => {
         const t = await db.insertTransaction({
@@ -41,8 +46,16 @@ export function buildTools(user: User) {
           category: i.categoria,
           description: i.descricao,
           occurred_on: i.data ?? today(),
+          shared: Boolean(i.compartilhada && user.partner_id),
         });
-        return json({ ok: true, id: t.id, data: t.occurred_on });
+        const alerta = t.kind === "despesa" ? await budgetAlert(user, t.category, t.occurred_on) : null;
+        return json({
+          ok: true,
+          id: t.id,
+          data: t.occurred_on,
+          ...(i.compartilhada ? { compartilhada: t.shared, ...(t.shared ? {} : { aviso: "Modo casal não está ativo; registrado só para o usuário." }) } : {}),
+          ...(alerta ? { alerta_orcamento: alerta } : {}),
+        });
       },
     }),
     betaZodTool({
@@ -278,7 +291,8 @@ export function buildTools(user: User) {
           txId = t.id;
         }
         await db.markBillPaid(user.id, bill.id, txId);
-        return json({ ok: true, registrado_como_gasto: Boolean(txId) });
+        const alerta = txId ? await budgetAlert(user, bill.category, localDate(user.timezone)) : null;
+        return json({ ok: true, registrado_como_gasto: Boolean(txId), ...(alerta ? { alerta_orcamento: alerta } : {}) });
       },
     }),
     betaZodTool({
@@ -350,6 +364,7 @@ export function buildTools(user: User) {
             category: t.categoria,
             description: t.descricao,
             occurred_on: t.data,
+            source: "importacao" as const,
           })),
         );
         const billRows = await db.insertBills(
@@ -382,7 +397,8 @@ export function buildTools(user: User) {
     }),
   ];
 
-  if (!googleEnabled) return [...finance, ...notes, ...reminders, ...bills, ...imports];
+  const modules = moduleTools(user);
+  if (!googleEnabled) return [...finance, ...notes, ...reminders, ...bills, ...imports, ...modules];
 
   const notConnected = () =>
     json({ ok: false, erro: "Agenda do Google não conectada. Ofereça o link usando a ferramenta conectar_agenda." });
@@ -443,5 +459,5 @@ export function buildTools(user: User) {
     }),
   ];
 
-  return [...finance, ...notes, ...reminders, ...bills, ...imports, ...calendar];
+  return [...finance, ...notes, ...reminders, ...bills, ...imports, ...modules, ...calendar];
 }

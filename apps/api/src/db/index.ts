@@ -1,5 +1,5 @@
 import { createClient } from "@supabase/supabase-js";
-import type { Bill, ChatMessage, Note, Recurrence, Reminder, Transaction, TransactionKind, User } from "@elpatron/shared";
+import type { Bill, Budget, ChatMessage, Goal, Note, Recurrence, Reminder, Subscription, Transaction, TransactionKind, User } from "@elpatron/shared";
 import { env } from "../config/env.js";
 
 export const db = createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY, {
@@ -69,6 +69,8 @@ export async function insertTransaction(t: {
   category: string;
   description?: string;
   occurred_on: string;
+  source?: Transaction["source"];
+  shared?: boolean;
 }): Promise<Transaction> {
   return check(await db.from("transactions").insert(t).select().single<Transaction>());
 }
@@ -167,7 +169,16 @@ export async function claimDueReminders(): Promise<Reminder[]> {
 // ---------- contas a pagar ----------
 
 export async function insertBills(
-  rows: { user_id: string; description: string; amount: number; category: string; due_on: string; source: Bill["source"] }[],
+  rows: {
+    user_id: string;
+    description: string;
+    amount: number;
+    category: string;
+    due_on: string;
+    source: Bill["source"];
+    subscription_id?: string;
+    installment?: number | null;
+  }[],
 ): Promise<Bill[]> {
   if (rows.length === 0) return [];
   return rows_(await db.from("bills").insert(rows).select().returns<Bill[]>());
@@ -236,7 +247,15 @@ export async function discardPendingImport(userId: string): Promise<boolean> {
 }
 
 export async function insertTransactions(
-  rows: { user_id: string; kind: TransactionKind; amount: number; category: string; description?: string; occurred_on: string }[],
+  rows: {
+    user_id: string;
+    kind: TransactionKind;
+    amount: number;
+    category: string;
+    description?: string;
+    occurred_on: string;
+    source?: Transaction["source"];
+  }[],
 ): Promise<number> {
   if (rows.length === 0) return 0;
   const list = rows_(await db.from("transactions").insert(rows).select("id"));
@@ -273,4 +292,163 @@ export async function trackUnknownContact(phone: string, pushName: string | unde
     ),
   );
   return shouldReply;
+}
+
+// ---------- orçamentos ----------
+
+export async function listBudgets(userId: string): Promise<Budget[]> {
+  return rows(await db.from("budgets").select("*").eq("user_id", userId).order("category").returns<Budget[]>());
+}
+
+export async function upsertBudget(userId: string, category: string, amount: number): Promise<Budget> {
+  return check(
+    await db
+      .from("budgets")
+      .upsert({ user_id: userId, category, amount }, { onConflict: "user_id,category" })
+      .select()
+      .single<Budget>(),
+  );
+}
+
+export async function deleteBudget(userId: string, category: string): Promise<boolean> {
+  const list = rows(await db.from("budgets").delete().eq("user_id", userId).eq("category", category).select("id"));
+  return list.length > 0;
+}
+
+/** Total de despesas por categoria entre duas datas. */
+export async function spentByCategory(userId: string, from: string, to: string): Promise<Record<string, number>> {
+  const list = rows(
+    await db
+      .from("transactions")
+      .select("category, amount")
+      .eq("user_id", userId)
+      .eq("kind", "despesa")
+      .gte("occurred_on", from)
+      .lte("occurred_on", to)
+      .returns<{ category: string; amount: number }[]>(),
+  );
+  const out: Record<string, number> = {};
+  for (const r of list) out[r.category] = (out[r.category] ?? 0) + Number(r.amount);
+  return out;
+}
+
+/** Registra que o aviso foi mandado; false se já tinha sido neste mês. */
+export async function claimBudgetAlert(userId: string, category: string, month: string, level: number): Promise<boolean> {
+  const { error } = await db.from("budget_alerts_sent").insert({ user_id: userId, category, month, level });
+  if (!error) return true;
+  if (error.code === "23505") return false;
+  throw new Error(`Supabase: ${error.message}`);
+}
+
+export async function setBudgetAlertPct(userId: string, pct: number) {
+  check(await db.from("users").update({ budget_alert_pct: pct }).eq("id", userId));
+}
+
+// ---------- metas ----------
+
+export async function listGoals(userId: string): Promise<Goal[]> {
+  return rows(await db.from("goals").select("*").eq("user_id", userId).order("created_at").returns<Goal[]>());
+}
+
+export async function insertGoal(g: { user_id: string; name: string; target_amount: number; deadline?: string | null; saved_amount?: number }): Promise<Goal> {
+  return check(await db.from("goals").insert(g).select().single<Goal>());
+}
+
+export async function getGoal(userId: string, id: string): Promise<Goal | null> {
+  return check(await db.from("goals").select("*").eq("user_id", userId).eq("id", id).maybeSingle<Goal>());
+}
+
+/** Guarda (ou retira, se negativo) dinheiro na meta. Devolve a meta atualizada. */
+export async function depositGoal(userId: string, goal: Goal, amount: number): Promise<Goal> {
+  check(await db.from("goal_deposits").insert({ goal_id: goal.id, user_id: userId, amount }));
+  const saved = Math.max(0, Math.round((Number(goal.saved_amount) + amount) * 100) / 100);
+  const done = saved >= Number(goal.target_amount);
+  return check(
+    await db
+      .from("goals")
+      .update({ saved_amount: saved, completed_at: done ? (goal.completed_at ?? new Date().toISOString()) : null })
+      .eq("id", goal.id)
+      .eq("user_id", userId)
+      .select()
+      .single<Goal>(),
+  );
+}
+
+export async function deleteGoal(userId: string, id: string): Promise<boolean> {
+  const list = rows(await db.from("goals").delete().eq("user_id", userId).eq("id", id).select("id"));
+  return list.length > 0;
+}
+
+// ---------- assinaturas & parcelamentos ----------
+
+export async function insertSubscription(s: Omit<Subscription, "id" | "created_at" | "active" | "last_billed_on"> & { last_billed_on?: string | null }): Promise<Subscription> {
+  return check(await db.from("subscriptions").insert(s).select().single<Subscription>());
+}
+
+export async function listSubscriptions(userId: string, onlyActive = true): Promise<Subscription[]> {
+  let q = db.from("subscriptions").select("*").eq("user_id", userId).order("billing_day");
+  if (onlyActive) q = q.eq("active", true);
+  return rows(await q.returns<Subscription[]>());
+}
+
+export async function activeSubscriptionsAllUsers(): Promise<Subscription[]> {
+  return rows(await db.from("subscriptions").select("*").eq("active", true).returns<Subscription[]>());
+}
+
+export async function updateSubscription(id: string, patch: Partial<Pick<Subscription, "last_billed_on" | "active">>) {
+  check(await db.from("subscriptions").update(patch).eq("id", id));
+}
+
+export async function cancelSubscription(userId: string, id: string): Promise<boolean> {
+  const list = rows(await db.from("subscriptions").update({ active: false }).eq("user_id", userId).eq("id", id).select("id"));
+  if (list.length) {
+    // contas futuras ainda não pagas dessa assinatura saem junto
+    const today = new Date().toISOString().slice(0, 10);
+    check(await db.from("bills").delete().eq("subscription_id", id).is("paid_at", null).gt("due_on", today));
+  }
+  return list.length > 0;
+}
+
+/** Insere a conta do mês da assinatura; false se já existia. */
+export async function insertSubscriptionBill(b: {
+  user_id: string;
+  description: string;
+  amount: number;
+  category: string;
+  due_on: string;
+  subscription_id: string;
+  installment: number | null;
+}): Promise<Bill | null> {
+  const { data, error } = await db.from("bills").insert({ ...b, source: "web" }).select().single<Bill>();
+  if (error?.code === "23505") return null;
+  if (error) throw new Error(`Supabase: ${error.message}`);
+  return data;
+}
+
+// ---------- modo casal ----------
+
+export async function sharedTransactions(userIds: string[], from: string, to: string): Promise<Transaction[]> {
+  return rows(
+    await db
+      .from("transactions")
+      .select("*")
+      .in("user_id", userIds)
+      .eq("shared", true)
+      .gte("occurred_on", from)
+      .lte("occurred_on", to)
+      .order("occurred_on", { ascending: false })
+      .returns<Transaction[]>(),
+  );
+}
+
+export async function settlementsBetween(a: string, b: string, month: string) {
+  return rows(
+    await db
+      .from("couple_settlements")
+      .select("payer_id, receiver_id, amount")
+      .eq("month", month)
+      .in("payer_id", [a, b])
+      .in("receiver_id", [a, b])
+      .returns<{ payer_id: string; receiver_id: string; amount: number }[]>(),
+  );
 }

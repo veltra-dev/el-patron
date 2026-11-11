@@ -60,3 +60,44 @@ export function maskPhone(phone: string) {
   const d = phone.replace(/^55/, "");
   return d.length === 11 ? `(${d.slice(0, 2)}) ${d.slice(2, 7)}-${d.slice(7)}` : phone;
 }
+
+/** Valor sem centavos quando redondo: "R$ 6.000" / "R$ 724,49". */
+export function moneyShort(v: number) {
+  return Number.isInteger(Math.round(v * 100) / 100) ? `R$ ${Math.round(v).toLocaleString("pt-BR")}` : money(v);
+}
+
+/** "1.234,56", "1234.56", "R$ 30" -> número (ou NaN). */
+export function parseMoney(raw: FormDataEntryValue | null): number {
+  let s = String(raw ?? "").replace(/[^\d,.-]/g, "");
+  if (s.includes(",")) s = s.replace(/\./g, "").replace(",", ".");
+  return Math.round(Number(s) * 100) / 100;
+}
+
+export function todayIn(timeZone: string, date = new Date()) {
+  return new Intl.DateTimeFormat("en-CA", { timeZone }).format(date);
+}
+
+export function greeting(timeZone: string, date = new Date()) {
+  const h = Number(new Intl.DateTimeFormat("en-GB", { timeZone, hour: "2-digit", hourCycle: "h23" }).format(date));
+  return h < 5 ? "Boa noite" : h < 12 ? "Bom dia" : h < 18 ? "Boa tarde" : "Boa noite";
+}
+
+/** "10 nov" a partir de "2026-11-10". */
+export function dayShort(isoDate: string) {
+  return new Intl.DateTimeFormat("pt-BR", { day: "numeric", month: "short", timeZone: "UTC" })
+    .format(new Date(`${isoDate}T12:00:00Z`))
+    .replace(".", "")
+    .replace(" de ", " ");
+}
+
+/** "Hoje", "Ontem", "Amanhã" ou "quarta, 11 nov". */
+export function relativeDay(isoDate: string, today: string) {
+  const diff = Math.round((Date.parse(`${isoDate}T12:00:00Z`) - Date.parse(`${today}T12:00:00Z`)) / 86_400_000);
+  if (diff === 0) return "Hoje";
+  if (diff === -1) return "Ontem";
+  if (diff === 1) return "Amanhã";
+  const wd = new Intl.DateTimeFormat("pt-BR", { weekday: "long", timeZone: "UTC" }).format(new Date(`${isoDate}T12:00:00Z`));
+  return `${wd.replace("-feira", "")}, ${dayShort(isoDate)}`.replace(/^./, (c) => c.toUpperCase());
+}
+
+export const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;

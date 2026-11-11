@@ -8,19 +8,25 @@ import { transcribe } from "../services/transcription.js";
 import type { IncomingMessage } from "../whatsapp/types.js";
 import { whatsapp } from "../whatsapp/evolution.js";
 
-// Fila por usuário: mensagens da mesma pessoa são processadas em ordem,
-// para o histórico não embaralhar quando ela manda várias seguidas.
-const queues = new Map<string, Promise<void>>();
+// Fila por usuário (chave: telefone normalizado): mensagens da mesma pessoa,
+// do WhatsApp ou do painel web, são processadas em ordem, para o histórico
+// não embaralhar quando ela manda várias seguidas.
+const queues = new Map<string, Promise<unknown>>();
+
+export function runInUserQueue<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  const prev = queues.get(key) ?? Promise.resolve();
+  const next = prev.catch(() => {}).then(fn);
+  const tail = next.catch(() => {}).finally(() => {
+    if (queues.get(key) === tail) queues.delete(key);
+  });
+  queues.set(key, tail);
+  return next;
+}
 
 export function enqueueIncoming(msg: IncomingMessage) {
-  const prev = queues.get(msg.from) ?? Promise.resolve();
-  const next = prev
-    .then(() => handleIncoming(msg))
-    .catch((err) => logger.error({ err, msgId: msg.id }, "erro ao processar mensagem"))
-    .finally(() => {
-      if (queues.get(msg.from) === next) queues.delete(msg.from);
-    });
-  queues.set(msg.from, next);
+  runInUserQueue(normalizePhone(msg.from), () => handleIncoming(msg)).catch((err) =>
+    logger.error({ err, msgId: msg.id }, "erro ao processar mensagem"),
+  );
 }
 
 async function handleIncoming(msg: IncomingMessage) {

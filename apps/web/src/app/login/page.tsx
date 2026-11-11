@@ -13,8 +13,8 @@ export default async function LoginPage() {
       <div className="w-full max-w-sm">
         <div className="mb-8 text-center">
           <Logo className="mx-auto mb-3 size-14" />
-          <h1 className="text-2xl font-semibold tracking-tight">ElPatrón</h1>
-          <p className="mt-1 text-sm text-[var(--text-secondary)]">Seus gastos, notas e lembretes do WhatsApp.</p>
+          <h1 className="display text-3xl font-bold">ElPatrón</h1>
+          <p className="mt-1 text-sm text-soft">Seu assistente financeiro no WhatsApp.</p>
         </div>
         <div className="card p-6">
           <LoginForm />

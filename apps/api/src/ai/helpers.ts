@@ -1,6 +1,18 @@
-import { localToIso, type Bill, type User } from "@elpatron/shared";
+import {
+  budgetStatus,
+  categoryLabel,
+  dueDateIn,
+  forecast,
+  localToIso,
+  monthOf,
+  subscriptionDueIn,
+  type Bill,
+  type Outflow,
+  type Subscription,
+  type User,
+} from "@elpatron/shared";
 import * as db from "../db/index.js";
-import { formatDateTime } from "../lib/time.js";
+import { formatDateTime, localDate } from "../lib/time.js";
 
 const brl = new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" });
 export const money = (v: number) => brl.format(v);
@@ -70,3 +82,80 @@ export async function importSummary(userId: string, txs: Tx[], contas: Conta[], 
     },
   };
 }
+
+// ---------------- orçamentos ----------------
+
+/**
+ * Depois de um gasto: se a categoria tem orçamento e cruzou o % de aviso (ou
+ * estourou), devolve o texto do alerta, uma vez por nível por mês.
+ */
+export async function budgetAlert(user: User, category: string, date: string): Promise<string | null> {
+  const budget = (await db.listBudgets(user.id)).find((b) => b.category === category);
+  if (!budget) return null;
+  const month = monthOf(date);
+  const spent = (await db.spentByCategory(user.id, `${month}-01`, dueDateIn(month, 31)))[category] ?? 0;
+  const limit = Number(budget.amount);
+  const st = budgetStatus(spent, limit, user.budget_alert_pct);
+  const label = categoryLabel(category);
+  if (st.level === "estourou" && (await db.claimBudgetAlert(user.id, category, month, 100))) {
+    return `Estourou o orçamento de ${label}: ${money(spent)} de ${money(limit)} (passou ${money(spent - limit)}).`;
+  }
+  if (st.level === "alerta" && (await db.claimBudgetAlert(user.id, category, month, user.budget_alert_pct))) {
+    return `${label} chegou a ${Math.round(st.pct)}% do orçamento: ${money(spent)} de ${money(limit)}, restam ${money(st.remaining)}.`;
+  }
+  return null;
+}
+
+// ---------------- assinaturas ----------------
+
+export function subscriptionBillLabel(sub: Pick<Subscription, "description" | "kind" | "installments_total">, installment: number | null) {
+  return sub.kind === "parcelamento" && installment ? `${sub.description} (${installment}/${sub.installments_total})` : sub.description;
+}
+
+/** Lança a conta do mês da assinatura/parcela, se ainda não foi lançada. */
+export async function billSubscription(sub: Subscription, user: User): Promise<Bill | null> {
+  const today = localDate(user.timezone);
+  const month = monthOf(today);
+  const due = subscriptionDueIn(sub, month);
+  if (!due) {
+    // parcelamento já terminou
+    if (sub.kind === "parcelamento" && month > monthOf(sub.start_month)) await db.updateSubscription(sub.id, { active: false });
+    return null;
+  }
+  if (sub.last_billed_on && due.due_on <= sub.last_billed_on) return null;
+  const bill = await db.insertSubscriptionBill({
+    user_id: user.id,
+    description: subscriptionBillLabel(sub, due.installment),
+    amount: Number(sub.amount),
+    category: sub.category,
+    due_on: due.due_on,
+    subscription_id: sub.id,
+    installment: due.installment,
+  });
+  await db.updateSubscription(sub.id, { last_billed_on: due.due_on });
+  if (bill) await createBillReminder(user, bill);
+  return bill;
+}
+
+// ---------------- previsão de caixa ----------------
+
+/** Saldo do mês até hoje e projeção até o fim do mês, descontando contas e assinaturas ainda não lançadas. */
+export async function cashForecast(user: User) {
+  const today = localDate(user.timezone);
+  const month = monthOf(today);
+  const end = dueDateIn(month, 31);
+  const [txs, bills, subs] = await Promise.all([
+    db.listTransactions(user.id, `${month}-01`, end),
+    db.listBills(user.id, { to: end, status: "pendentes" }),
+    db.listSubscriptions(user.id),
+  ]);
+  const balance = txs.reduce((s, t) => s + (t.kind === "receita" ? 1 : -1) * Number(t.amount), 0);
+  const outflows: Outflow[] = bills.map((b) => ({ date: b.due_on, amount: Number(b.amount), label: b.description }));
+  for (const sub of subs) {
+    const due = subscriptionDueIn(sub, month);
+    if (!due || due.due_on < today || (sub.last_billed_on && due.due_on <= sub.last_billed_on)) continue;
+    outflows.push({ date: due.due_on, amount: Number(sub.amount), label: subscriptionBillLabel(sub, due.installment) });
+  }
+  return { today, end, balance, outflows, ...forecast(balance, today, end, outflows) };
+}
+

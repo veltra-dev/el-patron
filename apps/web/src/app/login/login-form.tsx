@@ -24,7 +24,7 @@ export function LoginForm() {
     return (
       <form action={checkCode} className="space-y-4">
         <input type="hidden" name="phone" value={sentTo} />
-        <p className="text-sm text-[var(--text-secondary)]">
+        <p className="text-sm text-soft">
           Mandei um código de 6 dígitos no seu WhatsApp. Ele chega numa conversa com o ElPatrón.
         </p>
         <label className="block">
@@ -40,15 +40,15 @@ export function LoginForm() {
             className="input text-center font-mono text-2xl tracking-[0.5em]"
           />
         </label>
-        {error && <p role="alert" className="text-sm text-[var(--critical-text)]">{error}</p>}
-        <button className="btn-primary w-full" disabled={checking}>
+        {error && <p role="alert" className="text-sm text-bad">{error}</p>}
+        <button className="btn btn-accent w-full" disabled={checking}>
           {checking ? "Conferindo…" : "Entrar"}
         </button>
         <div className="flex justify-between text-sm">
-          <button type="button" className="link" onClick={() => setEditing(true)}>
+          <button type="button" className="link-accent" onClick={() => setEditing(true)}>
             Trocar número
           </button>
-          <button type="submit" formAction={sendCode} formNoValidate className="link" disabled={sending}>
+          <button type="submit" formAction={sendCode} formNoValidate className="link-accent" disabled={sending}>
             {sending ? "Enviando…" : "Reenviar código"}
           </button>
         </div>
@@ -73,8 +73,8 @@ export function LoginForm() {
           className="input text-lg"
         />
       </label>
-      {error && <p role="alert" className="text-sm text-[var(--critical-text)]">{error}</p>}
-      <button className="btn-primary w-full" disabled={sending}>
+      {error && <p role="alert" className="text-sm text-bad">{error}</p>}
+      <button className="btn btn-accent w-full" disabled={sending}>
         {sending ? "Enviando código…" : "Receber código no WhatsApp"}
       </button>
     </form>

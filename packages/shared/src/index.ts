@@ -31,6 +31,8 @@ export interface User {
   name: string;
   timezone: string;
   google_refresh_token: string | null; // criptografado
+  budget_alert_pct: number; // % do teto em que o Patrón avisa
+  partner_id: string | null; // modo casal
   created_at: string;
 }
 
@@ -42,6 +44,9 @@ export interface Transaction {
   category: ExpenseCategory;
   description: string | null;
   occurred_on: string; // YYYY-MM-DD
+  source: "whatsapp" | "importacao" | "web";
+  shared: boolean; // modo casal: dividida com o parceiro
+  partner_share_pct: number; // parte do parceiro (%)
   created_at: string;
 }
 
@@ -78,6 +83,42 @@ export interface Bill {
   paid_at: string | null;
   transaction_id: string | null;
   source: "whatsapp" | "importacao" | "web";
+  subscription_id: string | null;
+  installment: number | null;
+  created_at: string;
+}
+
+export interface Budget {
+  id: string;
+  user_id: string;
+  category: ExpenseCategory;
+  amount: number;
+  created_at: string;
+}
+
+export interface Goal {
+  id: string;
+  user_id: string;
+  name: string;
+  target_amount: number;
+  saved_amount: number;
+  deadline: string | null; // YYYY-MM-DD
+  completed_at: string | null;
+  created_at: string;
+}
+
+export interface Subscription {
+  id: string;
+  user_id: string;
+  kind: "assinatura" | "parcelamento";
+  description: string;
+  amount: number;
+  category: ExpenseCategory;
+  billing_day: number;
+  start_month: string; // YYYY-MM-01
+  installments_total: number | null;
+  last_billed_on: string | null;
+  active: boolean;
   created_at: string;
 }
 
@@ -224,4 +265,132 @@ export function describeRecurrence(r: Pick<Reminder, "recurrence" | "recurrence_
     case "mensal":
       return `Todo dia ${r.recurrence_days?.[0] ?? "?"} às ${time}`;
   }
+}
+
+// Cálculos financeiros puros, usados pela API (ferramentas do Patrón) e pelo
+// painel web, para os dois mostrarem sempre os mesmos números.
+
+export function addDaysIso(date: string, n: number): string {
+  const d = new Date(`${date}T12:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + n);
+  return d.toISOString().slice(0, 10);
+}
+
+/** "2026-11" de "2026-11-10". */
+export const monthOf = (date: string) => date.slice(0, 7);
+
+export function lastDayOfMonth(month: string): number {
+  const [y, m] = month.split("-").map(Number) as [number, number];
+  return new Date(Date.UTC(y, m, 0)).getUTCDate();
+}
+
+/** Vencimento no mês, com dia 31 caindo no último dia de meses curtos. */
+export function dueDateIn(month: string, day: number): string {
+  return `${month}-${String(Math.min(day, lastDayOfMonth(month))).padStart(2, "0")}`;
+}
+
+export function shiftMonthIso(month: string, delta: number): string {
+  const [y, m] = month.split("-").map(Number) as [number, number];
+  const d = new Date(Date.UTC(y, m - 1 + delta, 1));
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
+}
+
+/** Quantos meses de `from` até `to` ("YYYY-MM"). */
+export function monthsBetween(from: string, to: string): number {
+  const [y1, m1] = from.split("-").map(Number) as [number, number];
+  const [y2, m2] = to.split("-").map(Number) as [number, number];
+  return (y2 - y1) * 12 + (m2 - m1);
+}
+
+// ---------------- assinaturas & parcelamentos ----------------
+
+type SubLike = {
+  kind: "assinatura" | "parcelamento";
+  amount: number | string;
+  billing_day: number;
+  start_month: string;
+  installments_total: number | null;
+};
+
+/** Cobrança da assinatura/parcela no mês, ou null se não houver (antes do início ou depois da última parcela). */
+export function subscriptionDueIn(sub: SubLike, month: string): { due_on: string; installment: number | null } | null {
+  const n = monthsBetween(monthOf(sub.start_month), month) + 1;
+  if (n < 1) return null;
+  if (sub.kind === "parcelamento" && sub.installments_total && n > sub.installments_total) return null;
+  return { due_on: dueDateIn(month, sub.billing_day), installment: sub.kind === "parcelamento" ? n : null };
+}
+
+/** Situação de um parcelamento hoje: parcela atual, quantas faltam e quanto falta pagar. */
+export function installmentStatus(sub: SubLike, today: string) {
+  const total = sub.installments_total ?? 0;
+  const month = monthOf(today);
+  let current = monthsBetween(monthOf(sub.start_month), month) + 1;
+  // parcela do mês ainda não venceu: conta como "a pagar"
+  const dueThisMonth = dueDateIn(month, sub.billing_day);
+  const paidThrough = Math.max(0, Math.min(total, today >= dueThisMonth ? current : current - 1));
+  current = Math.max(1, Math.min(total, current));
+  const remaining = total - paidThrough;
+  const endMonth = shiftMonthIso(monthOf(sub.start_month), total - 1);
+  return { current, total, paid: paidThrough, remaining, remainingAmount: remaining * Number(sub.amount), endMonth };
+}
+
+// ---------------- orçamentos ----------------
+
+export type BudgetLevel = "ok" | "alerta" | "estourou";
+
+export function budgetStatus(spent: number, limit: number, alertPct: number) {
+  const pct = limit > 0 ? (spent / limit) * 100 : 0;
+  const level: BudgetLevel = spent > limit ? "estourou" : pct >= alertPct ? "alerta" : "ok";
+  return { pct, level, remaining: limit - spent };
+}
+
+// ---------------- previsão de caixa ----------------
+
+export type Outflow = { date: string; amount: number; label: string };
+
+/**
+ * Projeta o saldo dia a dia, de hoje até `end`, descontando as saídas
+ * previstas. Saídas com data anterior a hoje (atrasadas) caem hoje.
+ */
+export function forecast(startBalance: number, today: string, end: string, outflows: Outflow[]) {
+  const byDay = new Map<string, number>();
+  for (const o of outflows) {
+    const d = o.date < today ? today : o.date;
+    if (d > end) continue;
+    byDay.set(d, (byDay.get(d) ?? 0) + o.amount);
+  }
+  const points: { date: string; balance: number }[] = [];
+  let balance = startBalance;
+  let zeroOn: string | null = startBalance < 0 ? today : null;
+  for (let d = today; d <= end; d = addDaysIso(d, 1)) {
+    balance -= byDay.get(d) ?? 0;
+    points.push({ date: d, balance: Math.round(balance * 100) / 100 });
+    if (zeroOn === null && balance < 0) zeroOn = d;
+  }
+  const totalOut = [...byDay.values()].reduce((s, v) => s + v, 0);
+  return { points, endBalance: balance, zeroOn, totalOut, coverage: totalOut > 0 ? Math.max(0, startBalance) / totalOut : 1 };
+}
+
+// ---------------- modo casal ----------------
+
+type SharedTx = { user_id: string; amount: number | string; shared: boolean; partner_share_pct: number; kind: string };
+type Settlement = { payer_id: string; receiver_id: string; amount: number | string };
+
+/**
+ * Quanto o parceiro deve para `me` (negativo: eu devo a ele), considerando as
+ * despesas compartilhadas dos dois e os acertos já feitos.
+ */
+export function coupleBalance(me: string, partner: string, txs: SharedTx[], settlements: Settlement[] = []) {
+  let owedToMe = 0;
+  for (const t of txs) {
+    if (!t.shared || t.kind !== "despesa") continue;
+    const part = (Number(t.amount) * t.partner_share_pct) / 100;
+    if (t.user_id === me) owedToMe += part;
+    else if (t.user_id === partner) owedToMe -= part;
+  }
+  for (const s of settlements) {
+    if (s.payer_id === partner && s.receiver_id === me) owedToMe -= Number(s.amount);
+    else if (s.payer_id === me && s.receiver_id === partner) owedToMe += Number(s.amount);
+  }
+  return Math.round(owedToMe * 100) / 100;
 }

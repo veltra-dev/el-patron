@@ -1,6 +1,6 @@
-import { Logo } from "@/components/logo";
-import { Nav } from "@/components/nav";
-import { maskPhone } from "@/lib/format";
+import { Icon } from "@/components/icons";
+import { BottomNav, MobileHeader, Sidebar } from "@/components/shell";
+import { greeting } from "@/lib/format";
 import { requireUser } from "@/lib/session";
 import { logout } from "../login/actions";
 
@@ -8,23 +8,22 @@ export default async function PainelLayout({ children }: { children: React.React
   const user = await requireUser();
 
   return (
-    <div className="mx-auto min-h-dvh max-w-3xl px-4 pb-16">
-      <header className="flex items-center justify-between gap-3 py-4">
-        <div className="flex items-center gap-2.5">
-          <Logo className="size-9" />
-          <div className="leading-tight">
-            <div className="font-semibold">ElPatrón</div>
-            <div className="text-xs text-[var(--text-muted)]">
-              {user.name} · {maskPhone(user.phone)}
-            </div>
-          </div>
-        </div>
-        <form action={logout}>
-          <button className="btn-ghost">Sair</button>
-        </form>
-      </header>
-      <Nav />
-      <main className="mt-6">{children}</main>
+    <div className="min-h-dvh lg:flex">
+      <Sidebar
+        name={user.name}
+        logout={
+          <form action={logout}>
+            <button className="flex min-h-10 w-full items-center gap-3 rounded-xl px-3.5 text-sm font-medium text-muted hover:bg-surface hover:text-ink">
+              <Icon name="logout" size={18} /> Sair
+            </button>
+          </form>
+        }
+      />
+      <div className="min-w-0 flex-1">
+        <MobileHeader name={user.name} greeting={greeting(user.timezone)} />
+        <main className="mx-auto flex w-full max-w-[1240px] flex-col gap-5 px-4 pb-32 pt-3 lg:px-9 lg:pb-12 lg:pt-6">{children}</main>
+      </div>
+      <BottomNav />
     </div>
   );
 }

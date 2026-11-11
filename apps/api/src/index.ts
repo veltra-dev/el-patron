@@ -2,7 +2,9 @@ import Fastify from "fastify";
 import { timingSafeEqual } from "node:crypto";
 import { env, googleEnabled } from "./config/env.js";
 import { getUser } from "./db/index.js";
-import { enqueueIncoming } from "./handlers/incoming.js";
+import { enqueueIncoming, runInUserQueue } from "./handlers/incoming.js";
+import { runAgent } from "./ai/agent.js";
+import { startSubscriptionScheduler } from "./jobs/subscriptions.js";
 import { startReminderScheduler } from "./jobs/reminders.js";
 import { verifyState } from "./lib/crypto.js";
 import { logger } from "./lib/logger.js";
@@ -42,6 +44,19 @@ if (env.INTERNAL_API_SECRET) {
     await whatsapp.sendText(user.wa_number ?? user.phone, text);
     return { sent: true };
   });
+
+  // Chat do painel web: mesma conversa (histórico) do WhatsApp, mesma fila.
+  app.post<{ Body: { userId?: string; text?: string } }>("/internal/chat", async (req, reply) => {
+    const given = req.headers["x-internal-secret"];
+    if (typeof given !== "string" || !safeEqual(given, internalSecret)) return reply.code(401).send();
+    const { userId, text } = req.body ?? {};
+    if (!userId || !text?.trim()) return reply.code(400).send({ error: "userId e text são obrigatórios" });
+    if (text.length > 4000) return reply.code(400).send({ error: "mensagem muito longa" });
+    const user = await getUser(userId);
+    if (!user) return reply.code(404).send({ error: "usuário não encontrado" });
+    const answer = await runInUserQueue(user.phone, () => runAgent(user, text.trim()));
+    return { reply: answer };
+  });
 }
 
 const page = (msg: string) =>
@@ -66,6 +81,7 @@ if (googleEnabled) {
 }
 
 startReminderScheduler();
+startSubscriptionScheduler();
 
 app.listen({ port: env.PORT, host: "0.0.0.0" }).catch((err) => {
   logger.fatal(err);

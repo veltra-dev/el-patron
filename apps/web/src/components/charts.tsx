@@ -7,7 +7,7 @@ import { money, moneyCompact } from "@/lib/format";
 // e tabela equivalente para leitura sem cor.
 
 const tooltip =
-  "pointer-events-none absolute z-10 hidden whitespace-nowrap rounded-lg border border-[var(--border)] bg-[var(--surface)] px-2.5 py-1.5 text-xs shadow-lg group-hover:block group-focus-within:block";
+  "pointer-events-none absolute z-10 hidden whitespace-nowrap rounded-lg border border-[var(--border)] bg-[var(--surface-2)] px-2.5 py-1.5 text-xs shadow-lg group-hover:block group-focus-within:block";
 
 /* ---------------- Despesas por categoria (uma série, barras horizontais) ---------------- */
 
@@ -20,7 +20,7 @@ export function CategoryBars({ rows }: { rows: { label: string; value: number; c
       {rows.map((r) => {
         const pct = total ? (r.value / total) * 100 : 0;
         return (
-          <li key={r.label} tabIndex={0} className="group relative rounded-lg px-2 py-1.5 outline-none hover:bg-[var(--surface-2)] focus-visible:bg-[var(--surface-2)]">
+          <li key={r.label} tabIndex={0} className="group relative rounded-lg px-2 py-1.5 outline-none hover:bg-[var(--raised)] focus-visible:bg-[var(--raised)]">
             <div className="mb-1 flex items-baseline justify-between gap-3 text-sm">
               <span className="truncate">{r.label}</span>
               <span className="num shrink-0 font-medium">
@@ -28,7 +28,7 @@ export function CategoryBars({ rows }: { rows: { label: string; value: number; c
               </span>
             </div>
             <div className="h-2 rounded-r-[4px] bg-[var(--track)]">
-              <div className="h-full rounded-r-[4px] bg-[var(--series-1)]" style={{ width: `${(r.value / max) * 100}%` }} />
+              <div className="h-full rounded-r-[4px] bg-[var(--accent)]" style={{ width: `${(r.value / max) * 100}%` }} />
             </div>
             <div className={`${tooltip} right-2 top-full mt-1`}>
               <strong>{r.label}</strong> · {money(r.value)} · {pct.toFixed(1)}% do mês · {r.count} lançamento{r.count === 1 ? "" : "s"}
@@ -88,8 +88,8 @@ export function MonthlyColumns({ data, highlight }: { data: MonthPoint[]; highli
                 <div
                   key={d.month}
                   tabIndex={0}
-                  className={`group relative flex flex-1 items-end justify-center gap-[2px] rounded-t-md outline-none hover:bg-[var(--surface-2)] focus-visible:bg-[var(--surface-2)] ${
-                    d.month === highlight ? "bg-[color-mix(in_oklab,var(--surface-2)_60%,transparent)]" : ""
+                  className={`group relative flex flex-1 items-end justify-center gap-[2px] rounded-t-md outline-none hover:bg-[var(--raised)] focus-visible:bg-[var(--raised)] ${
+                    d.month === highlight ? "bg-[color-mix(in_oklab,var(--raised)_60%,transparent)]" : ""
                   }`}
                 >
                   <div className="w-[34%] max-w-5 rounded-t-[4px] bg-[var(--series-2)]" style={{ height: `${(d.despesa / top) * 100}%` }} />
@@ -142,19 +142,3 @@ export function MonthlyColumns({ data, highlight }: { data: MonthPoint[]; highli
   );
 }
 
-/* ---------------- Cartão de número ---------------- */
-
-export function StatTile({ label, value, tone, hint }: { label: string; value: number; tone?: "good" | "bad"; hint?: string }) {
-  const color = tone === "good" ? "text-[var(--good-text)]" : tone === "bad" ? "text-[var(--critical-text)]" : "";
-  const sign = tone === "bad" ? "▼ " : tone === "good" ? "▲ " : "";
-  return (
-    <div className="card h-full p-4">
-      <div className="text-xs font-medium uppercase tracking-wide text-[var(--text-muted)]">{label}</div>
-      <div className={`num mt-1 text-xl font-semibold sm:text-2xl ${color}`}>
-        {sign && <span className="text-sm" aria-hidden="true">{sign}</span>}
-        {money(value)}
-      </div>
-      {hint && <div className="mt-0.5 text-xs text-[var(--text-muted)]">{hint}</div>}
-    </div>
-  );
-}
