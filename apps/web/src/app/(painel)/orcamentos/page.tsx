@@ -15,7 +15,7 @@ export default async function OrcamentosPage() {
   const user = await requireUser();
   const month = currentMonth(user.timezone);
   const { from, to } = monthRange(month);
-  const [budgets, txs] = await Promise.all([listBudgets(user.id), transactionsBetween(user.id, from, to)]);
+  const [budgets, txs] = await Promise.all([listBudgets(user), transactionsBetween(user, from, to)]);
   const despesas = txs.filter((t) => t.kind === "despesa");
 
   const rows = budgets.map((b) => {

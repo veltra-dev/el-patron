@@ -12,7 +12,7 @@ const MODULES: { href: string; title: string; desc: string; icon: IconName }[] =
   { href: "/metas", title: "Metas & cofrinhos", desc: "Guardar pra um objetivo com prazo", icon: "metas" },
   { href: "/previsao", title: "Previsão de caixa", desc: "Saldo projetado até o fim do mês", icon: "previsao" },
   { href: "/assinaturas", title: "Assinaturas & parcelas", desc: "Recorrências e parcelamentos num lugar", icon: "assinaturas" },
-  { href: "/casal", title: "Modo casal", desc: "Dividir contas com quem mora com você", icon: "casal" },
+  { href: "/casal", title: "Modo casal", desc: "Conta conjunta com quem mora com você", icon: "casal" },
 ];
 
 export default async function MaisPage() {

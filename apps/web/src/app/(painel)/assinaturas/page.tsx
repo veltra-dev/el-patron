@@ -30,7 +30,7 @@ function CancelButton({ id, name }: { id: string; name: string }) {
 export default async function AssinaturasPage() {
   const user = await requireUser();
   const today = todayIn(user.timezone);
-  const subs = await listSubscriptions(user.id);
+  const subs = await listSubscriptions(user);
   const recurring = subs.filter((s) => s.kind === "assinatura");
   const installments = subs.map((s) => ({ s, st: s.kind === "parcelamento" ? installmentStatus(s, today) : null })).filter((x) => x.st && x.st.remaining > 0);
   const monthlyFixed = recurring.reduce((s, x) => s + Number(x.amount), 0) + installments.reduce((s, x) => s + Number(x.s.amount), 0);

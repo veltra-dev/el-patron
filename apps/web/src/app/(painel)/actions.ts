@@ -21,14 +21,14 @@ const done = (): FormState => {
 
 export async function removeTransaction(form: FormData) {
   const user = await requireUser();
-  await db.deleteTransaction(user.id, id(form));
+  await db.deleteTransaction(user, id(form));
   revalidatePath("/", "layout");
 }
 
-export async function toggleSharedTransaction(form: FormData) {
+export async function togglePersonalTransaction(form: FormData) {
   const user = await requireUser();
   if (!user.partner_id) return;
-  await db.toggleShared(user.id, id(form));
+  await db.togglePersonal(user.id, id(form));
   revalidatePath("/", "layout");
 }
 
@@ -48,7 +48,7 @@ export async function createTransaction(_: FormState, form: FormData): Promise<F
     category,
     description: str(form, "description") || null,
     occurred_on: date,
-    shared: Boolean(user.partner_id && form.get("shared")),
+    personal: Boolean(user.partner_id && form.get("personal")),
   });
   return done();
 }
@@ -57,13 +57,13 @@ export async function createTransaction(_: FormState, form: FormData): Promise<F
 
 export async function markBillPaid(form: FormData) {
   const user = await requireUser();
-  await db.payBill(user.id, id(form), todayIn(user.timezone));
+  await db.payBill(user, id(form), todayIn(user.timezone));
   revalidatePath("/", "layout");
 }
 
 export async function removeBill(form: FormData) {
   const user = await requireUser();
-  await db.deleteBill(user.id, id(form));
+  await db.deleteBill(user, id(form));
   revalidatePath("/", "layout");
 }
 
@@ -134,13 +134,13 @@ export async function saveBudget(_: FormState, form: FormData): Promise<FormStat
   const amount = parseMoney(form.get("amount"));
   if (!isCategory(category)) return { error: "Escolha uma categoria." };
   if (!(amount > 0)) return { error: "Informe o teto mensal." };
-  await db.upsertBudget(user.id, category, amount);
+  await db.upsertBudget(user, category, amount);
   return done();
 }
 
 export async function removeBudget(form: FormData) {
   const user = await requireUser();
-  await db.deleteBudget(user.id, id(form));
+  await db.deleteBudget(user, id(form));
   revalidatePath("/", "layout");
 }
 
@@ -171,13 +171,13 @@ export async function depositGoal(_: FormState, form: FormData): Promise<FormSta
   const user = await requireUser();
   const amount = parseMoney(form.get("amount"));
   if (!(amount > 0)) return { error: "Informe um valor maior que zero." };
-  await db.depositGoal(user.id, id(form), str(form, "op") === "retirar" ? -amount : amount);
+  await db.depositGoal(user, id(form), str(form, "op") === "retirar" ? -amount : amount);
   return done();
 }
 
 export async function removeGoal(form: FormData) {
   const user = await requireUser();
-  await db.deleteGoal(user.id, id(form));
+  await db.deleteGoal(user, id(form));
   revalidatePath("/", "layout");
 }
 
@@ -211,7 +211,7 @@ export async function createSubscription(_: FormState, form: FormData): Promise<
 
 export async function removeSubscription(form: FormData) {
   const user = await requireUser();
-  await db.cancelSubscription(user.id, id(form), todayIn(user.timezone));
+  await db.cancelSubscription(user, id(form), todayIn(user.timezone));
   revalidatePath("/", "layout");
 }
 
@@ -222,13 +222,13 @@ export async function invitePartner(_: FormState, form: FormData): Promise<FormS
   if (user.partner_id) return { error: "O modo casal já está ativo." };
   const phone = normalizePhone(str(form, "phone"));
   const other = await db.findUserByPhone(phone);
-  if (!other) return { error: "Esse número ainda não usa o ElPatrón. A pessoa precisa ser cliente para dividir as contas." };
+  if (!other) return { error: "Esse número ainda não usa o ElPatrón. A pessoa precisa ser cliente para juntar as contas." };
   if (other.id === user.id) return { error: "Esse é o seu próprio número 🙂" };
   if (other.partner_id) return { error: "Essa pessoa já está no modo casal com outra conta." };
   await db.createInvite(user.id, other.id);
   await sendWhatsApp(
     other.id,
-    `💛 ${user.name} quer dividir as contas com você no *ElPatrón* (modo casal). Para aceitar, abra o painel em *Modo casal*.`,
+    `💛 ${user.name} quer juntar as finanças com você no *ElPatrón* (conta conjunta). Para aceitar, abra o painel em *Modo casal*.`,
   ).catch(() => {});
   return done();
 }
@@ -238,7 +238,7 @@ export async function answerInvite(form: FormData) {
   const from = str(form, "from");
   if (str(form, "answer") === "aceitar") {
     const ok = await db.linkPartners(user.id, from);
-    if (ok) await sendWhatsApp(from, `💛 ${user.name} aceitou! O modo casal está ativo no ElPatrón.`).catch(() => {});
+    if (ok) await sendWhatsApp(from, `💛 ${user.name} aceitou! A conta conjunta está ativa: agora vocês veem os lançamentos um do outro no ElPatrón.`).catch(() => {});
   } else {
     await db.deleteInvite(from, user.id);
   }
@@ -255,41 +255,6 @@ export async function unlinkPartner() {
   const user = await requireUser();
   if (user.partner_id) await db.unlinkPartners(user.id, user.partner_id);
   revalidatePath("/", "layout");
-}
-
-/** Cobra o parceiro no WhatsApp com o valor do acerto. */
-export async function chargePartner(_: FormState, form: FormData): Promise<FormState> {
-  const user = await requireUser();
-  if (!user.partner_id) return { error: "Modo casal não está ativo." };
-  const amount = parseMoney(form.get("amount"));
-  const month = str(form, "month");
-  if (!(amount > 0)) return { error: "Nada a cobrar." };
-  try {
-    await sendWhatsApp(
-      user.partner_id,
-      `🧾 Acerto do mês (${month.slice(5)}/${month.slice(0, 4)}): pela divisão das contas compartilhadas, você deve *${money(amount)}* para ${user.name}. Quando pagar, ${user.name} marca como acertado no painel.`,
-    );
-  } catch {
-    return { error: "Não consegui mandar a mensagem agora. Tente de novo." };
-  }
-  return { ok: true, at: Date.now() };
-}
-
-export async function settleUp(form: FormData) {
-  const user = await requireUser();
-  if (!user.partner_id) return;
-  const amount = parseMoney(form.get("amount"));
-  const month = str(form, "month");
-  if (!(amount > 0) || !/^\d{4}-\d{2}$/.test(month)) return;
-  // quem devia pagou
-  const partnerPaid = str(form, "direction") === "partner_paid";
-  await db.insertSettlement({
-    payer_id: partnerPaid ? user.partner_id : user.id,
-    receiver_id: partnerPaid ? user.id : user.partner_id,
-    amount,
-    month,
-  });
-  revalidatePath("/casal");
 }
 
 // ---------- chat ----------

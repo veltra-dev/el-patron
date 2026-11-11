@@ -7,6 +7,7 @@ import {
   monthOf,
   subscriptionDueIn,
   type Bill,
+  type Member,
   type Outflow,
   type Subscription,
   type User,
@@ -45,7 +46,7 @@ type Tx = { tipo: "despesa" | "receita"; valor: number; categoria: string; descr
 type Conta = { descricao: string; valor: number; vencimento: string };
 
 /** Resumo do rascunho para o modelo apresentar ao usuário. */
-export async function importSummary(userId: string, txs: Tx[], contas: Conta[], today: string) {
+export async function importSummary(user: Member, txs: Tx[], contas: Conta[], today: string) {
   const despesas = txs.filter((t) => t.tipo === "despesa");
   const receitas = txs.filter((t) => t.tipo === "receita");
   const porCategoria: Record<string, number> = {};
@@ -54,7 +55,7 @@ export async function importSummary(userId: string, txs: Tx[], contas: Conta[], 
   let possiveisDuplicadas = 0;
   if (txs.length) {
     const dates = txs.map((t) => t.data).sort();
-    const existing = await db.listTransactions(userId, dates[0]!, dates.at(-1)!);
+    const existing = await db.listTransactions(user, dates[0]!, dates.at(-1)!);
     const seen = new Set(existing.map((e) => `${e.occurred_on}|${Number(e.amount).toFixed(2)}`));
     possiveisDuplicadas = txs.filter((t) => seen.has(`${t.data}|${t.valor.toFixed(2)}`)).length;
   }
@@ -90,17 +91,17 @@ export async function importSummary(userId: string, txs: Tx[], contas: Conta[], 
  * estourou), devolve o texto do alerta, uma vez por nível por mês.
  */
 export async function budgetAlert(user: User, category: string, date: string): Promise<string | null> {
-  const budget = (await db.listBudgets(user.id)).find((b) => b.category === category);
+  const budget = (await db.listBudgets(user)).find((b) => b.category === category);
   if (!budget) return null;
   const month = monthOf(date);
-  const spent = (await db.spentByCategory(user.id, `${month}-01`, dueDateIn(month, 31)))[category] ?? 0;
+  const spent = (await db.spentByCategory(user, `${month}-01`, dueDateIn(month, 31)))[category] ?? 0;
   const limit = Number(budget.amount);
   const st = budgetStatus(spent, limit, user.budget_alert_pct);
   const label = categoryLabel(category);
-  if (st.level === "estourou" && (await db.claimBudgetAlert(user.id, category, month, 100))) {
+  if (st.level === "estourou" && (await db.claimBudgetAlert(user, category, month, 100))) {
     return `Estourou o orçamento de ${label}: ${money(spent)} de ${money(limit)} (passou ${money(spent - limit)}).`;
   }
-  if (st.level === "alerta" && (await db.claimBudgetAlert(user.id, category, month, user.budget_alert_pct))) {
+  if (st.level === "alerta" && (await db.claimBudgetAlert(user, category, month, user.budget_alert_pct))) {
     return `${label} chegou a ${Math.round(st.pct)}% do orçamento: ${money(spent)} de ${money(limit)}, restam ${money(st.remaining)}.`;
   }
   return null;
@@ -145,9 +146,9 @@ export async function cashForecast(user: User) {
   const month = monthOf(today);
   const end = dueDateIn(month, 31);
   const [txs, bills, subs] = await Promise.all([
-    db.listTransactions(user.id, `${month}-01`, end),
-    db.listBills(user.id, { to: end, status: "pendentes" }),
-    db.listSubscriptions(user.id),
+    db.listTransactions(user, `${month}-01`, end),
+    db.listBills(user, { to: end, status: "pendentes" }),
+    db.listSubscriptions(user),
   ]);
   const balance = txs.reduce((s, t) => s + (t.kind === "receita" ? 1 : -1) * Number(t.amount), 0);
   const outflows: Outflow[] = bills.map((b) => ({ date: b.due_on, amount: Number(b.amount), label: b.description }));

@@ -26,8 +26,8 @@ export default async function ContasPage({ searchParams }: { searchParams: Promi
 
   const { from, to } = monthRange(month);
   const [bills, overdueBefore] = await Promise.all([
-    listBills(user.id, from, to),
-    isCurrent ? overdueBills(user.id, from) : Promise.resolve([] as Bill[]),
+    listBills(user, from, to),
+    isCurrent ? overdueBills(user, from) : Promise.resolve([] as Bill[]),
   ]);
 
   const open = [...overdueBefore, ...bills.filter((b) => !b.paid_at)];

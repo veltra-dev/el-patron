@@ -1,5 +1,5 @@
 import { createClient } from "@supabase/supabase-js";
-import type { Bill, Budget, ChatMessage, Goal, Note, Recurrence, Reminder, Subscription, Transaction, TransactionKind, User } from "@elpatron/shared";
+import { householdIds, householdKey, type Bill, type Budget, type ChatMessage, type Goal, type Member, type Note, type Recurrence, type Reminder, type Subscription, type Transaction, type TransactionKind, type User } from "@elpatron/shared";
 import { env } from "../config/env.js";
 
 export const db = createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY, {
@@ -15,6 +15,18 @@ function rows<T>(res: { data: T[] | null; error: { message: string } | null }): 
   return check(res) ?? [];
 }
 const rows_ = rows;
+
+// Conta conjunta: finanças (transações, contas, orçamentos, metas, assinaturas)
+// são lidas dos dois membros da casa. Notas, lembretes e histórico seguem pessoais.
+type Filterable = { in(col: string, v: string[]): Filterable; or(f: string): Filterable };
+function household<Q>(q: Q, u: Member): Q {
+  return (q as unknown as Filterable).in("user_id", householdIds(u)) as unknown as Q;
+}
+/** Transações do parceiro marcadas como pessoais não aparecem. */
+function visibleTx<Q>(q: Q, u: Member): Q {
+  const f = (q as unknown as Filterable).in("user_id", householdIds(u));
+  return (u.partner_id ? f.or(`personal.eq.false,user_id.eq.${u.id}`) : f) as unknown as Q;
+}
 
 // ---------- idempotência ----------
 
@@ -70,16 +82,13 @@ export async function insertTransaction(t: {
   description?: string;
   occurred_on: string;
   source?: Transaction["source"];
-  shared?: boolean;
+  personal?: boolean;
 }): Promise<Transaction> {
   return check(await db.from("transactions").insert(t).select().single<Transaction>());
 }
 
-export async function listTransactions(userId: string, from: string, to: string, category?: string): Promise<Transaction[]> {
-  let q = db
-    .from("transactions")
-    .select("*")
-    .eq("user_id", userId)
+export async function listTransactions(u: Member, from: string, to: string, category?: string): Promise<Transaction[]> {
+  let q = visibleTx(db.from("transactions").select("*"), u)
     .gte("occurred_on", from)
     .lte("occurred_on", to)
     .order("occurred_on", { ascending: false });
@@ -87,8 +96,8 @@ export async function listTransactions(userId: string, from: string, to: string,
   return rows(await q.returns<Transaction[]>());
 }
 
-export async function deleteTransaction(userId: string, id: string): Promise<boolean> {
-  const list = rows(await db.from("transactions").delete().eq("user_id", userId).eq("id", id).select("id"));
+export async function deleteTransaction(u: Member, id: string): Promise<boolean> {
+  const list = rows(await visibleTx(db.from("transactions").delete(), u).eq("id", id).select("id"));
   return list.length > 0;
 }
 
@@ -184,8 +193,8 @@ export async function insertBills(
   return rows_(await db.from("bills").insert(rows).select().returns<Bill[]>());
 }
 
-export async function listBills(userId: string, opts: { from?: string; to?: string; status?: "pendentes" | "pagas" | "todas" }): Promise<Bill[]> {
-  let q = db.from("bills").select("*").eq("user_id", userId).order("due_on");
+export async function listBills(u: Member, opts: { from?: string; to?: string; status?: "pendentes" | "pagas" | "todas" }): Promise<Bill[]> {
+  let q = household(db.from("bills").select("*"), u).order("due_on");
   if (opts.from) q = q.gte("due_on", opts.from);
   if (opts.to) q = q.lte("due_on", opts.to);
   if (opts.status === "pendentes") q = q.is("paid_at", null);
@@ -193,24 +202,18 @@ export async function listBills(userId: string, opts: { from?: string; to?: stri
   return rows_(await q.returns<Bill[]>());
 }
 
-export async function getBill(userId: string, id: string): Promise<Bill | null> {
-  return check(await db.from("bills").select("*").eq("user_id", userId).eq("id", id).maybeSingle<Bill>());
+export async function getBill(u: Member, id: string): Promise<Bill | null> {
+  return check(await household(db.from("bills").select("*"), u).eq("id", id).maybeSingle<Bill>());
 }
 
-export async function markBillPaid(userId: string, id: string, transactionId: string | null) {
-  check(
-    await db
-      .from("bills")
-      .update({ paid_at: new Date().toISOString(), transaction_id: transactionId })
-      .eq("user_id", userId)
-      .eq("id", id),
-  );
+export async function markBillPaid(u: Member, id: string, transactionId: string | null) {
+  check(await household(db.from("bills").update({ paid_at: new Date().toISOString(), transaction_id: transactionId }), u).eq("id", id));
   // o lembrete de vencimento deixa de fazer sentido
   check(await db.from("reminders").delete().eq("bill_id", id).is("sent_at", null));
 }
 
-export async function deleteBill(userId: string, id: string): Promise<boolean> {
-  const list = rows(await db.from("bills").delete().eq("user_id", userId).eq("id", id).select("id"));
+export async function deleteBill(u: Member, id: string): Promise<boolean> {
+  const list = rows(await household(db.from("bills").delete(), u).eq("id", id).select("id"));
   return list.length > 0;
 }
 
@@ -296,32 +299,36 @@ export async function trackUnknownContact(phone: string, pushName: string | unde
 
 // ---------- orçamentos ----------
 
-export async function listBudgets(userId: string): Promise<Budget[]> {
-  return rows(await db.from("budgets").select("*").eq("user_id", userId).order("category").returns<Budget[]>());
+/** Orçamentos da casa. Se os dois tinham teto para a mesma categoria antes de juntar, vale o da chave da casa. */
+export async function listBudgets(u: Member): Promise<Budget[]> {
+  const key = householdKey(u);
+  const list = rows(await household(db.from("budgets").select("*"), u).order("category").returns<Budget[]>());
+  const byCat = new Map<string, Budget>();
+  for (const b of list) if (!byCat.has(b.category) || b.user_id === key) byCat.set(b.category, b);
+  return [...byCat.values()];
 }
 
-export async function upsertBudget(userId: string, category: string, amount: number): Promise<Budget> {
+export async function upsertBudget(u: Member, category: string, amount: number): Promise<Budget> {
+  const key = householdKey(u);
+  check(await household(db.from("budgets").delete(), u).eq("category", category).neq("user_id", key));
   return check(
     await db
       .from("budgets")
-      .upsert({ user_id: userId, category, amount }, { onConflict: "user_id,category" })
+      .upsert({ user_id: key, category, amount }, { onConflict: "user_id,category" })
       .select()
       .single<Budget>(),
   );
 }
 
-export async function deleteBudget(userId: string, category: string): Promise<boolean> {
-  const list = rows(await db.from("budgets").delete().eq("user_id", userId).eq("category", category).select("id"));
+export async function deleteBudget(u: Member, category: string): Promise<boolean> {
+  const list = rows(await household(db.from("budgets").delete(), u).eq("category", category).select("id"));
   return list.length > 0;
 }
 
-/** Total de despesas por categoria entre duas datas. */
-export async function spentByCategory(userId: string, from: string, to: string): Promise<Record<string, number>> {
+/** Total de despesas por categoria entre duas datas (da casa, no modo casal). */
+export async function spentByCategory(u: Member, from: string, to: string): Promise<Record<string, number>> {
   const list = rows(
-    await db
-      .from("transactions")
-      .select("category, amount")
-      .eq("user_id", userId)
+    await visibleTx(db.from("transactions").select("category, amount"), u)
       .eq("kind", "despesa")
       .gte("occurred_on", from)
       .lte("occurred_on", to)
@@ -333,8 +340,9 @@ export async function spentByCategory(userId: string, from: string, to: string):
 }
 
 /** Registra que o aviso foi mandado; false se já tinha sido neste mês. */
-export async function claimBudgetAlert(userId: string, category: string, month: string, level: number): Promise<boolean> {
-  const { error } = await db.from("budget_alerts_sent").insert({ user_id: userId, category, month, level });
+export async function claimBudgetAlert(u: Member, category: string, month: string, level: number): Promise<boolean> {
+  // pela chave da casa: o aviso sai uma vez só, para quem fez o gasto que cruzou o limite
+  const { error } = await db.from("budget_alerts_sent").insert({ user_id: householdKey(u), category, month, level });
   if (!error) return true;
   if (error.code === "23505") return false;
   throw new Error(`Supabase: ${error.message}`);
@@ -346,21 +354,21 @@ export async function setBudgetAlertPct(userId: string, pct: number) {
 
 // ---------- metas ----------
 
-export async function listGoals(userId: string): Promise<Goal[]> {
-  return rows(await db.from("goals").select("*").eq("user_id", userId).order("created_at").returns<Goal[]>());
+export async function listGoals(u: Member): Promise<Goal[]> {
+  return rows(await household(db.from("goals").select("*"), u).order("created_at").returns<Goal[]>());
 }
 
 export async function insertGoal(g: { user_id: string; name: string; target_amount: number; deadline?: string | null; saved_amount?: number }): Promise<Goal> {
   return check(await db.from("goals").insert(g).select().single<Goal>());
 }
 
-export async function getGoal(userId: string, id: string): Promise<Goal | null> {
-  return check(await db.from("goals").select("*").eq("user_id", userId).eq("id", id).maybeSingle<Goal>());
+export async function getGoal(u: Member, id: string): Promise<Goal | null> {
+  return check(await household(db.from("goals").select("*"), u).eq("id", id).maybeSingle<Goal>());
 }
 
 /** Guarda (ou retira, se negativo) dinheiro na meta. Devolve a meta atualizada. */
-export async function depositGoal(userId: string, goal: Goal, amount: number): Promise<Goal> {
-  check(await db.from("goal_deposits").insert({ goal_id: goal.id, user_id: userId, amount }));
+export async function depositGoal(u: Member, goal: Goal, amount: number): Promise<Goal> {
+  check(await db.from("goal_deposits").insert({ goal_id: goal.id, user_id: u.id, amount }));
   const saved = Math.max(0, Math.round((Number(goal.saved_amount) + amount) * 100) / 100);
   const done = saved >= Number(goal.target_amount);
   return check(
@@ -368,14 +376,13 @@ export async function depositGoal(userId: string, goal: Goal, amount: number): P
       .from("goals")
       .update({ saved_amount: saved, completed_at: done ? (goal.completed_at ?? new Date().toISOString()) : null })
       .eq("id", goal.id)
-      .eq("user_id", userId)
       .select()
       .single<Goal>(),
   );
 }
 
-export async function deleteGoal(userId: string, id: string): Promise<boolean> {
-  const list = rows(await db.from("goals").delete().eq("user_id", userId).eq("id", id).select("id"));
+export async function deleteGoal(u: Member, id: string): Promise<boolean> {
+  const list = rows(await household(db.from("goals").delete(), u).eq("id", id).select("id"));
   return list.length > 0;
 }
 
@@ -385,8 +392,8 @@ export async function insertSubscription(s: Omit<Subscription, "id" | "created_a
   return check(await db.from("subscriptions").insert(s).select().single<Subscription>());
 }
 
-export async function listSubscriptions(userId: string, onlyActive = true): Promise<Subscription[]> {
-  let q = db.from("subscriptions").select("*").eq("user_id", userId).order("billing_day");
+export async function listSubscriptions(u: Member, onlyActive = true): Promise<Subscription[]> {
+  let q = household(db.from("subscriptions").select("*"), u).order("billing_day");
   if (onlyActive) q = q.eq("active", true);
   return rows(await q.returns<Subscription[]>());
 }
@@ -399,8 +406,8 @@ export async function updateSubscription(id: string, patch: Partial<Pick<Subscri
   check(await db.from("subscriptions").update(patch).eq("id", id));
 }
 
-export async function cancelSubscription(userId: string, id: string): Promise<boolean> {
-  const list = rows(await db.from("subscriptions").update({ active: false }).eq("user_id", userId).eq("id", id).select("id"));
+export async function cancelSubscription(u: Member, id: string): Promise<boolean> {
+  const list = rows(await household(db.from("subscriptions").update({ active: false }), u).eq("id", id).select("id"));
   if (list.length) {
     // contas futuras ainda não pagas dessa assinatura saem junto
     const today = new Date().toISOString().slice(0, 10);
@@ -423,32 +430,4 @@ export async function insertSubscriptionBill(b: {
   if (error?.code === "23505") return null;
   if (error) throw new Error(`Supabase: ${error.message}`);
   return data;
-}
-
-// ---------- modo casal ----------
-
-export async function sharedTransactions(userIds: string[], from: string, to: string): Promise<Transaction[]> {
-  return rows(
-    await db
-      .from("transactions")
-      .select("*")
-      .in("user_id", userIds)
-      .eq("shared", true)
-      .gte("occurred_on", from)
-      .lte("occurred_on", to)
-      .order("occurred_on", { ascending: false })
-      .returns<Transaction[]>(),
-  );
-}
-
-export async function settlementsBetween(a: string, b: string, month: string) {
-  return rows(
-    await db
-      .from("couple_settlements")
-      .select("payer_id, receiver_id, amount")
-      .eq("month", month)
-      .in("payer_id", [a, b])
-      .in("receiver_id", [a, b])
-      .returns<{ payer_id: string; receiver_id: string; amount: number }[]>(),
-  );
 }

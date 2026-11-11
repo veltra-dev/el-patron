@@ -3,7 +3,6 @@ import {
   EXPENSE_CATEGORIES,
   budgetStatus,
   categoryLabel,
-  coupleBalance,
   dueDateIn,
   installmentStatus,
   monthOf,
@@ -32,7 +31,7 @@ export function moduleTools(user: User) {
         valor: z.number().positive().describe("Teto mensal em reais"),
       }),
       run: async (i) => {
-        const b = await db.upsertBudget(user.id, i.categoria, cents(i.valor));
+        const b = await db.upsertBudget(user, i.categoria, cents(i.valor));
         return json({ ok: true, categoria: b.category, teto: money(Number(b.amount)), aviso_em: `${user.budget_alert_pct}%` });
       },
     }),
@@ -43,8 +42,8 @@ export function moduleTools(user: User) {
       run: async () => {
         const month = monthOf(today());
         const [list, spent] = await Promise.all([
-          db.listBudgets(user.id),
-          db.spentByCategory(user.id, `${month}-01`, dueDateIn(month, 31)),
+          db.listBudgets(user),
+          db.spentByCategory(user, `${month}-01`, dueDateIn(month, 31)),
         ]);
         if (!list.length) return json({ orcamentos: [], dica: "Nenhum orçamento definido ainda." });
         return json({
@@ -67,7 +66,7 @@ export function moduleTools(user: User) {
       name: "remover_orcamento",
       description: "Remove o orçamento de uma categoria.",
       inputSchema: z.object({ categoria: z.enum(EXPENSE_CATEGORIES) }),
-      run: async (i) => json({ ok: await db.deleteBudget(user.id, i.categoria) }),
+      run: async (i) => json({ ok: await db.deleteBudget(user, i.categoria) }),
     }),
     betaZodTool({
       name: "ajustar_alerta_orcamento",
@@ -106,7 +105,7 @@ export function moduleTools(user: User) {
       description: "Lista as metas com quanto já foi guardado, % e prazo. Use também para achar o id antes de guardar/retirar.",
       inputSchema: z.object({}),
       run: async () => {
-        const list = await db.listGoals(user.id);
+        const list = await db.listGoals(user);
         return json(
           list.map((g) => ({
             id: g.id,
@@ -125,9 +124,9 @@ export function moduleTools(user: User) {
       description: "Guarda dinheiro numa meta (valor positivo) ou retira (valor negativo).",
       inputSchema: z.object({ id: z.uuid(), valor: z.number().refine((v) => v !== 0, "valor não pode ser zero") }),
       run: async (i) => {
-        const goal = await db.getGoal(user.id, i.id);
+        const goal = await db.getGoal(user, i.id);
         if (!goal) return json({ ok: false, erro: "Meta não encontrada" });
-        const g = await db.depositGoal(user.id, goal, cents(i.valor));
+        const g = await db.depositGoal(user, goal, cents(i.valor));
         return json({
           ok: true,
           guardado: money(Number(g.saved_amount)),
@@ -140,7 +139,7 @@ export function moduleTools(user: User) {
       name: "apagar_meta",
       description: "Apaga uma meta.",
       inputSchema: z.object({ id: z.uuid() }),
-      run: async (i) => json({ ok: await db.deleteGoal(user.id, i.id) }),
+      run: async (i) => json({ ok: await db.deleteGoal(user, i.id) }),
     }),
   ];
 
@@ -196,7 +195,7 @@ export function moduleTools(user: User) {
       description: "Lista assinaturas e parcelamentos ativos, com total mensal e quanto falta quitar dos parcelamentos.",
       inputSchema: z.object({}),
       run: async () => {
-        const list = await db.listSubscriptions(user.id);
+        const list = await db.listSubscriptions(user);
         const t = today();
         const items = list.map((s) => {
           const base = { id: s.id, tipo: s.kind, descricao: s.description, valor_mensal: money(Number(s.amount)), dia: s.billing_day };
@@ -211,7 +210,7 @@ export function moduleTools(user: User) {
       name: "cancelar_assinatura",
       description: "Cancela uma assinatura/parcelamento: para de lançar contas novas e remove as futuras ainda não pagas.",
       inputSchema: z.object({ id: z.uuid() }),
-      run: async (i) => json({ ok: await db.cancelSubscription(user.id, i.id) }),
+      run: async (i) => json({ ok: await db.cancelSubscription(user, i.id) }),
     }),
   ];
 
@@ -237,30 +236,24 @@ export function moduleTools(user: User) {
 
   const couple = [
     betaZodTool({
-      name: "acerto_casal",
-      description: "Modo casal: mostra quanto um deve ao outro no mês, pelas despesas compartilhadas dos dois.",
+      name: "resumo_casal",
+      description:
+        "Conta conjunta (modo casal): quanto cada um gastou e recebeu no mês. As finanças dos dois já são uma conta só; " +
+        "use para 'quanto a Lais gastou esse mês?' ou 'quem gastou mais?'.",
       inputSchema: z.object({ mes: z.string().regex(/^\d{4}-\d{2}$/).optional().describe("YYYY-MM; padrão o mês atual") }),
       run: async (i) => {
         if (!user.partner_id) return json({ ok: false, erro: "Modo casal não está ativo. Ele é ativado no painel web, em Modo casal." });
         const partner = await db.getUser(user.partner_id);
         if (!partner) return json({ ok: false, erro: "Parceiro não encontrado" });
         const month = i.mes ?? monthOf(today());
-        const [txs, settlements] = await Promise.all([
-          db.sharedTransactions([user.id, partner.id], `${month}-01`, dueDateIn(month, 31)),
-          db.settlementsBetween(user.id, partner.id, month),
-        ]);
-        const net = coupleBalance(user.id, partner.id, txs, settlements);
+        const txs = await db.listTransactions(user, `${month}-01`, dueDateIn(month, 31));
+        const sum = (uid: string, kind: string) =>
+          money(txs.filter((t) => t.user_id === uid && t.kind === kind).reduce((s, t) => s + Number(t.amount), 0));
         return json({
-          parceiro: partner.name,
           mes: month,
-          resultado:
-            net > 0 ? `${partner.name} deve ${money(net)} ao usuário` : net < 0 ? `o usuário deve ${money(-net)} a ${partner.name}` : "tudo acertado",
-          despesas_compartilhadas: txs.map((t) => ({
-            descricao: t.description,
-            valor: money(Number(t.amount)),
-            pago_por: t.user_id === user.id ? "usuário" : partner.name,
-            data: t.occurred_on,
-          })),
+          usuario: { gastou: sum(user.id, "despesa"), recebeu: sum(user.id, "receita") },
+          [partner.name.split(" ")[0]!]: { gastou: sum(partner.id, "despesa"), recebeu: sum(partner.id, "receita") },
+          obs: "Não inclui os lançamentos pessoais do parceiro(a).",
         });
       },
     }),

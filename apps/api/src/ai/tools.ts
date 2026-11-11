@@ -22,6 +22,13 @@ const json = (v: unknown) => JSON.stringify(v);
 /** Cria as ferramentas já presas ao usuário da conversa. */
 export function buildTools(user: User) {
   const today = () => localDate(user.timezone);
+  // conta conjunta: nome de quem lançou cada item ("você" ou o parceiro)
+  let partnerName: Promise<string | null> | undefined;
+  const who = async (ownerId: string) => {
+    if (!user.partner_id) return undefined;
+    partnerName ??= db.getUser(user.partner_id).then((p) => p?.name.split(" ")[0] ?? null);
+    return ownerId === user.id ? "usuário" : ((await partnerName) ?? "parceiro(a)");
+  };
 
   const finance = [
     betaZodTool({
@@ -33,10 +40,10 @@ export function buildTools(user: User) {
         categoria: z.enum(EXPENSE_CATEGORIES),
         descricao: z.string().optional().describe("Ex.: 'ifood', 'conta de luz'"),
         data: isoDate.optional().describe("Data da transação; padrão hoje"),
-        compartilhada: z
+        pessoal: z
           .boolean()
           .optional()
-          .describe("Modo casal: true se o gasto é dividido 50/50 com o parceiro(a) (ex.: 'mercado da casa, divide com a Lais')"),
+          .describe("Conta conjunta (modo casal): true se o parceiro(a) NÃO deve ver este lançamento (ex.: 'comprei um presente pra Lais, não mostra pra ela')"),
       }),
       run: async (i) => {
         const t = await db.insertTransaction({
@@ -46,14 +53,14 @@ export function buildTools(user: User) {
           category: i.categoria,
           description: i.descricao,
           occurred_on: i.data ?? today(),
-          shared: Boolean(i.compartilhada && user.partner_id),
+          personal: Boolean(i.pessoal && user.partner_id),
         });
         const alerta = t.kind === "despesa" ? await budgetAlert(user, t.category, t.occurred_on) : null;
         return json({
           ok: true,
           id: t.id,
           data: t.occurred_on,
-          ...(i.compartilhada ? { compartilhada: t.shared, ...(t.shared ? {} : { aviso: "Modo casal não está ativo; registrado só para o usuário." }) } : {}),
+          ...(i.pessoal ? { pessoal: t.personal, ...(t.personal ? {} : { aviso: "Modo casal não está ativo: os lançamentos já são só do usuário." }) } : {}),
           ...(alerta ? { alerta_orcamento: alerta } : {}),
         });
       },
@@ -68,18 +75,24 @@ export function buildTools(user: User) {
         categoria: z.enum(EXPENSE_CATEGORIES).optional(),
       }),
       run: async (i) => {
-        const rows = await db.listTransactions(user.id, i.inicio, i.fim, i.categoria);
+        const rows = await db.listTransactions(user, i.inicio, i.fim, i.categoria);
         const totais = { despesa: 0, receita: 0 };
         const porCategoria: Record<string, number> = {};
+        const porPessoa: Record<string, { despesa: number; receita: number }> = {};
+        const quem = new Map<string, string | undefined>();
         for (const r of rows) {
           const v = Number(r.amount);
           totais[r.kind] += v;
           if (r.kind === "despesa") porCategoria[r.category] = (porCategoria[r.category] ?? 0) + v;
+          if (!quem.has(r.user_id)) quem.set(r.user_id, await who(r.user_id));
+          const q = quem.get(r.user_id);
+          if (q) (porPessoa[q] ??= { despesa: 0, receita: 0 })[r.kind] += v;
         }
         return json({
           totais,
           saldo: totais.receita - totais.despesa,
           despesas_por_categoria: porCategoria,
+          ...(user.partner_id ? { conta_conjunta: true, por_pessoa: porPessoa } : {}),
           transacoes: rows.slice(0, 60).map((r) => ({
             id: r.id,
             tipo: r.kind,
@@ -87,6 +100,7 @@ export function buildTools(user: User) {
             categoria: r.category,
             descricao: r.description,
             data: r.occurred_on,
+            ...(user.partner_id ? { quem: quem.get(r.user_id), ...(r.personal ? { pessoal: true } : {}) } : {}),
           })),
           total_transacoes: rows.length,
         });
@@ -96,7 +110,7 @@ export function buildTools(user: User) {
       name: "remover_transacao",
       description: "Remove uma transação pelo id.",
       inputSchema: z.object({ id: z.uuid() }),
-      run: async (i) => json({ ok: await db.deleteTransaction(user.id, i.id) }),
+      run: async (i) => json({ ok: await db.deleteTransaction(user, i.id) }),
     }),
   ];
 
@@ -248,20 +262,21 @@ export function buildTools(user: User) {
         fim: isoDate.optional(),
       }),
       run: async (i) => {
-        const rows = await db.listBills(user.id, { from: i.inicio, to: i.fim, status: i.status ?? "pendentes" });
+        const rows = await db.listBills(user, { from: i.inicio, to: i.fim, status: i.status ?? "pendentes" });
         const today = localDate(user.timezone);
         const pend = rows.filter((b) => !b.paid_at);
         return json({
           hoje: today,
           total_pendente: pend.reduce((s, b) => s + Number(b.amount), 0),
           atrasadas: pend.filter((b) => b.due_on < today).length,
-          contas: rows.map((b) => ({
+          contas: await Promise.all(rows.map(async (b) => ({
             id: b.id,
+            ...(user.partner_id ? { quem_cadastrou: await who(b.user_id) } : {}),
             descricao: b.description,
             valor: Number(b.amount),
             vencimento: b.due_on,
             situacao: b.paid_at ? "paga" : dueLabel(b.due_on, today),
-          })),
+          }))),
         });
       },
     }),
@@ -275,7 +290,7 @@ export function buildTools(user: User) {
         valor_pago: z.number().positive().optional().describe("Se pagou valor diferente do previsto"),
       }),
       run: async (i) => {
-        const bill = await db.getBill(user.id, i.id);
+        const bill = await db.getBill(user, i.id);
         if (!bill) return json({ ok: false, erro: "Conta não encontrada" });
         if (bill.paid_at) return json({ ok: false, erro: "Essa conta já estava paga" });
         let txId: string | null = null;
@@ -290,7 +305,7 @@ export function buildTools(user: User) {
           });
           txId = t.id;
         }
-        await db.markBillPaid(user.id, bill.id, txId);
+        await db.markBillPaid(user, bill.id, txId);
         const alerta = txId ? await budgetAlert(user, bill.category, localDate(user.timezone)) : null;
         return json({ ok: true, registrado_como_gasto: Boolean(txId), ...(alerta ? { alerta_orcamento: alerta } : {}) });
       },
@@ -299,7 +314,7 @@ export function buildTools(user: User) {
       name: "remover_conta",
       description: "Apaga uma conta a pagar (cadastrada errado, cancelada).",
       inputSchema: z.object({ id: z.uuid() }),
-      run: async (i) => json({ ok: await db.deleteBill(user.id, i.id) }),
+      run: async (i) => json({ ok: await db.deleteBill(user, i.id) }),
     }),
   ];
 
@@ -332,7 +347,7 @@ export function buildTools(user: User) {
       run: async (i) => {
         if (i.transacoes.length + i.contas.length === 0) return json({ ok: false, erro: "Nenhum item para importar" });
         await db.savePendingImport(user.id, i.nome_arquivo ?? null, { transacoes: i.transacoes, contas: i.contas });
-        return json({ ok: true, rascunho_salvo: true, ...(await importSummary(user.id, i.transacoes, i.contas, localDate(user.timezone))) });
+        return json({ ok: true, rascunho_salvo: true, ...(await importSummary(user, i.transacoes, i.contas, localDate(user.timezone))) });
       },
     }),
     betaZodTool({
@@ -352,7 +367,7 @@ export function buildTools(user: User) {
         let txs = payload.transacoes;
         if (i.ignorar_duplicados !== false && txs.length) {
           const dates = txs.map((t) => t.data).sort();
-          const existing = await db.listTransactions(user.id, dates[0]!, dates.at(-1)!);
+          const existing = await db.listTransactions(user, dates[0]!, dates.at(-1)!);
           const seen = new Set(existing.map((e) => `${e.occurred_on}|${Number(e.amount).toFixed(2)}`));
           txs = txs.filter((t) => !seen.has(`${t.data}|${t.valor.toFixed(2)}`));
         }

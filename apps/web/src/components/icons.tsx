@@ -104,10 +104,10 @@ const PATHS = {
       <path d="m6 7 1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12" />
     </>
   ),
-  split: (
+  lock: (
     <>
-      <path d="M12 3v18" />
-      <path d="M5 8h4M15 16h4M17 14v4" />
+      <rect x="5" y="11" width="14" height="9" rx="2" />
+      <path d="M8 11V8a4 4 0 0 1 8 0v3" />
     </>
   ),
   download: <path d="M12 4v11m-5-5 5 5 5-5M5 20h14" />,

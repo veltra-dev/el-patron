@@ -26,10 +26,10 @@ export default async function ResumoPage({ searchParams }: { searchParams: Promi
   const firstMonth = shiftMonth(month, -5);
   const { from, to } = monthRange(month);
   const [all, monthBills, overdue, budgets, fc] = await Promise.all([
-    transactionsBetween(user.id, monthRange(firstMonth).from, to),
-    listBills(user.id, from, to),
-    isCurrent ? overdueBills(user.id, from) : Promise.resolve([]),
-    listBudgets(user.id),
+    transactionsBetween(user, monthRange(firstMonth).from, to),
+    listBills(user, from, to),
+    isCurrent ? overdueBills(user, from) : Promise.resolve([]),
+    listBudgets(user),
     isCurrent ? cashForecast(user) : Promise.resolve(null),
   ]);
 

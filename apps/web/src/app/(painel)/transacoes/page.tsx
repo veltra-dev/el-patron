@@ -8,7 +8,7 @@ import { Chips, Empty, PageHeader, SearchBox, Stat } from "@/components/ui";
 import { getUser, transactionsBetween } from "@/lib/db";
 import { currentMonth, dayShort, isValidMonth, money, monthLabel, monthRange, relativeDay, todayIn } from "@/lib/format";
 import { requireUser } from "@/lib/session";
-import { createTransaction, removeTransaction, toggleSharedTransaction } from "../actions";
+import { createTransaction, removeTransaction, togglePersonalTransaction } from "../actions";
 
 export const metadata = { title: "Transações · ElPatrón" };
 
@@ -24,7 +24,7 @@ export default async function TransacoesPage({ searchParams }: { searchParams: P
   const today = todayIn(user.timezone);
 
   const { from, to } = monthRange(month);
-  const [all, partner] = await Promise.all([transactionsBetween(user.id, from, to), user.partner_id ? getUser(user.partner_id) : null]);
+  const [all, partner] = await Promise.all([transactionsBetween(user, from, to), user.partner_id ? getUser(user.partner_id) : null]);
   const entradas = all.filter((t) => t.kind === "receita").reduce((s, t) => s + Number(t.amount), 0);
   const saidas = all.filter((t) => t.kind === "despesa").reduce((s, t) => s + Number(t.amount), 0);
   const rows = all.filter(
@@ -44,6 +44,19 @@ export default async function TransacoesPage({ searchParams }: { searchParams: P
     return s ? `/transacoes?${s}` : "/transacoes";
   };
   const resultado = entradas - saidas;
+  const pn = partner?.name.split(" ")[0] ?? "";
+  // conta conjunta: etiqueta de quem lançou
+  const Who = ({ t }: { t: Transaction }) =>
+    partner ? (
+      <>
+        {t.user_id === user.id ? (
+          <span className="ml-2 rounded-full bg-accent-bg px-2 py-0.5 text-[11px] font-semibold text-accent-soft">você</span>
+        ) : (
+          <span className="ml-2 rounded-full bg-partner/20 px-2 py-0.5 text-[11px] font-semibold text-[#b3aaf5]">{pn}</span>
+        )}
+        {t.personal && <span className="ml-1.5 rounded-full border border-line-strong px-2 py-0.5 text-[11px] font-semibold text-muted">pessoal</span>}
+      </>
+    ) : null;
 
   const newTx = (
     <FormDialog
@@ -81,7 +94,7 @@ export default async function TransacoesPage({ searchParams }: { searchParams: P
       </div>
       {partner && (
         <label className="flex items-center gap-2.5 text-sm">
-          <input type="checkbox" name="shared" className="size-5 accent-[var(--accent)]" /> Dividir 50/50 com {partner.name.split(" ")[0]}
+          <input type="checkbox" name="personal" className="size-5 accent-[var(--accent)]" /> Pessoal: {partner.name.split(" ")[0]} não vê
         </label>
       )}
     </FormDialog>
@@ -89,14 +102,14 @@ export default async function TransacoesPage({ searchParams }: { searchParams: P
 
   const actions = (t: Transaction) => (
     <div className="flex items-center justify-end">
-      {partner && t.kind === "despesa" && (
-        <form action={toggleSharedTransaction}>
+      {partner && t.user_id === user.id && (
+        <form action={togglePersonalTransaction}>
           <input type="hidden" name="id" value={t.id} />
           <ConfirmButton
-            label={t.shared ? `Parar de dividir com ${partner.name}` : `Dividir com ${partner.name}`}
-            className={`grid size-10 place-items-center rounded-full transition-colors hover:bg-raised ${t.shared ? "text-partner" : "text-muted hover:text-ink"}`}
+            label={t.personal ? `Mostrar para ${pn}` : `Esconder de ${pn} (pessoal)`}
+            className={`grid size-10 place-items-center rounded-full transition-colors hover:bg-raised ${t.personal ? "text-accent" : "text-muted hover:text-ink"}`}
           >
-            <Icon name="casal" size={17} />
+            <Icon name="lock" size={17} />
           </ConfirmButton>
         </form>
       )}
@@ -161,7 +174,7 @@ export default async function TransacoesPage({ searchParams }: { searchParams: P
                   <tr key={t.id}>
                     <td className="px-5 py-3 font-semibold">
                       {t.description || categoryLabel(t.category)}
-                      {t.shared && <span className="ml-2 rounded-full bg-partner/20 px-2 py-0.5 text-[11px] font-semibold text-[#b3aaf5]">dividida</span>}
+                      <Who t={t} />
                     </td>
                     <td className="px-3 py-3 text-soft">{categoryLabel(t.category)}</td>
                     <td className={`px-3 py-3 ${t.source === "whatsapp" ? "text-accent-soft" : "text-soft"}`}>{ORIGIN[t.source] ?? t.source}</td>
@@ -204,7 +217,8 @@ export default async function TransacoesPage({ searchParams }: { searchParams: P
                           <div className="truncate font-semibold">{t.description || categoryLabel(t.category)}</div>
                           <div className="truncate text-[13px] text-muted">
                             {categoryLabel(t.category)}
-                            {t.shared && " · dividida"}
+                            {partner && ` · ${t.user_id === user.id ? "você" : pn}`}
+                            {t.personal && " · pessoal"}
                           </div>
                         </div>
                         <span className={`num shrink-0 font-semibold ${t.kind === "receita" ? "text-good" : ""}`}>

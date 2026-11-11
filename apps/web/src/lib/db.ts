@@ -1,6 +1,8 @@
 import "server-only";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import {
+  householdIds,
+  householdKey,
   localToIso,
   monthOf,
   subscriptionDueIn,
@@ -8,6 +10,7 @@ import {
   type Budget,
   type ChatMessage,
   type Goal,
+  type Member,
   type Note,
   type Recurrence,
   type Reminder,
@@ -25,6 +28,17 @@ function db() {
     auth: { persistSession: false, autoRefreshToken: false },
   });
   return client;
+}
+
+// Conta conjunta: finanças vêm dos dois membros da casa; notas, lembretes e chat são pessoais.
+type Filterable = { in(col: string, v: string[]): Filterable; or(f: string): Filterable };
+function household<Q>(q: Q, u: Member): Q {
+  return (q as unknown as Filterable).in("user_id", householdIds(u)) as unknown as Q;
+}
+/** Lançamentos pessoais do parceiro ficam de fora. */
+function visibleTx<Q>(q: Q, u: Member): Q {
+  const f = (q as unknown as Filterable).in("user_id", householdIds(u));
+  return (u.partner_id ? f.or(`personal.eq.false,user_id.eq.${u.id}`) : f) as unknown as Q;
 }
 
 function ok<T>(res: { data: T | null; error: { message: string } | null }): T {
@@ -74,13 +88,10 @@ export async function updateLoginCode(id: string, patch: { attempts?: number; co
 
 // ---------- dados do painel ----------
 
-export async function transactionsBetween(userId: string, from: string, to: string): Promise<Transaction[]> {
+export async function transactionsBetween(u: Member, from: string, to: string): Promise<Transaction[]> {
   return (
     ok(
-      await db()
-        .from("transactions")
-        .select("*")
-        .eq("user_id", userId)
+      await visibleTx(db().from("transactions").select("*"), u)
         .gte("occurred_on", from)
         .lte("occurred_on", to)
         .order("occurred_on", { ascending: false })
@@ -90,8 +101,8 @@ export async function transactionsBetween(userId: string, from: string, to: stri
   );
 }
 
-export async function deleteTransaction(userId: string, id: string) {
-  ok(await db().from("transactions").delete().eq("user_id", userId).eq("id", id));
+export async function deleteTransaction(u: Member, id: string) {
+  ok(await visibleTx(db().from("transactions").delete(), u).eq("id", id));
 }
 
 export async function listNotes(userId: string, query?: string): Promise<Note[]> {
@@ -131,13 +142,10 @@ export async function cancelReminder(userId: string, id: string) {
 
 // ---------- contas a pagar ----------
 
-export async function listBills(userId: string, from: string, to: string): Promise<Bill[]> {
+export async function listBills(u: Member, from: string, to: string): Promise<Bill[]> {
   return (
     ok(
-      await db()
-        .from("bills")
-        .select("*")
-        .eq("user_id", userId)
+      await household(db().from("bills").select("*"), u)
         .gte("due_on", from)
         .lte("due_on", to)
         .order("due_on")
@@ -147,13 +155,10 @@ export async function listBills(userId: string, from: string, to: string): Promi
 }
 
 /** Contas pendentes vencidas antes de `before` (atrasadas). */
-export async function overdueBills(userId: string, before: string): Promise<Bill[]> {
+export async function overdueBills(u: Member, before: string): Promise<Bill[]> {
   return (
     ok(
-      await db()
-        .from("bills")
-        .select("*")
-        .eq("user_id", userId)
+      await household(db().from("bills").select("*"), u)
         .is("paid_at", null)
         .lt("due_on", before)
         .order("due_on")
@@ -163,14 +168,14 @@ export async function overdueBills(userId: string, before: string): Promise<Bill
 }
 
 /** Marca como paga e lança a despesa no dia de hoje (mesmo comportamento do WhatsApp). */
-export async function payBill(userId: string, id: string, today: string) {
-  const bill = ok(await db().from("bills").select("*").eq("user_id", userId).eq("id", id).maybeSingle<Bill>());
+export async function payBill(u: Member, id: string, today: string) {
+  const bill = ok(await household(db().from("bills").select("*"), u).eq("id", id).maybeSingle<Bill>());
   if (!bill || bill.paid_at) return;
   const tx = ok(
     await db()
       .from("transactions")
       .insert({
-        user_id: userId,
+        user_id: u.id, // quem pagou
         kind: "despesa",
         amount: bill.amount,
         category: bill.category,
@@ -180,12 +185,12 @@ export async function payBill(userId: string, id: string, today: string) {
       .select("id")
       .single<{ id: string }>(),
   );
-  ok(await db().from("bills").update({ paid_at: new Date().toISOString(), transaction_id: tx.id }).eq("id", id).eq("user_id", userId));
+  ok(await db().from("bills").update({ paid_at: new Date().toISOString(), transaction_id: tx.id }).eq("id", id));
   ok(await db().from("reminders").delete().eq("bill_id", id).is("sent_at", null));
 }
 
-export async function deleteBill(userId: string, id: string) {
-  ok(await db().from("bills").delete().eq("user_id", userId).eq("id", id));
+export async function deleteBill(u: Member, id: string) {
+  ok(await household(db().from("bills").delete(), u).eq("id", id));
 }
 
 // ---------- criação pelo painel ----------
@@ -199,15 +204,16 @@ export async function insertTransaction(t: {
   category: string;
   description: string | null;
   occurred_on: string;
-  shared?: boolean;
+  personal?: boolean;
 }) {
   ok(await db().from("transactions").insert({ ...t, source: "web" }));
 }
 
-export async function toggleShared(userId: string, id: string) {
-  const t = ok(await db().from("transactions").select("shared").eq("user_id", userId).eq("id", id).maybeSingle<{ shared: boolean }>());
+/** Só quem lançou pode esconder/mostrar o lançamento para o parceiro. */
+export async function togglePersonal(userId: string, id: string) {
+  const t = ok(await db().from("transactions").select("personal").eq("user_id", userId).eq("id", id).maybeSingle<{ personal: boolean }>());
   if (!t) return;
-  ok(await db().from("transactions").update({ shared: !t.shared }).eq("user_id", userId).eq("id", id));
+  ok(await db().from("transactions").update({ personal: !t.personal }).eq("user_id", userId).eq("id", id));
 }
 
 /** Conta nova + aviso às 9h do vencimento (igual ao WhatsApp). */
@@ -257,16 +263,24 @@ export async function recentChat(userId: string, limit = 60): Promise<ChatMessag
 
 // ---------- orçamentos ----------
 
-export async function listBudgets(userId: string): Promise<Budget[]> {
-  return ok(await db().from("budgets").select("*").eq("user_id", userId).order("amount", { ascending: false }).returns<Budget[]>()) ?? [];
+/** Orçamentos da casa; categoria repetida (de antes de juntar) vale a da chave da casa. */
+export async function listBudgets(u: Member): Promise<Budget[]> {
+  const key = householdKey(u);
+  const list = ok(await household(db().from("budgets").select("*"), u).order("amount", { ascending: false }).returns<Budget[]>()) ?? [];
+  const byCat = new Map<string, Budget>();
+  for (const b of list) if (!byCat.has(b.category) || b.user_id === key) byCat.set(b.category, b);
+  return [...byCat.values()];
 }
 
-export async function upsertBudget(userId: string, category: string, amount: number) {
-  ok(await db().from("budgets").upsert({ user_id: userId, category, amount }, { onConflict: "user_id,category" }));
+export async function upsertBudget(u: Member, category: string, amount: number) {
+  const key = householdKey(u);
+  ok(await household(db().from("budgets").delete(), u).eq("category", category).neq("user_id", key));
+  ok(await db().from("budgets").upsert({ user_id: key, category, amount }, { onConflict: "user_id,category" }));
 }
 
-export async function deleteBudget(userId: string, id: string) {
-  ok(await db().from("budgets").delete().eq("user_id", userId).eq("id", id));
+export async function deleteBudget(u: Member, id: string) {
+  const b = ok(await household(db().from("budgets").select("category"), u).eq("id", id).maybeSingle<{ category: string }>());
+  if (b) ok(await household(db().from("budgets").delete(), u).eq("category", b.category));
 }
 
 export async function setBudgetAlertPct(userId: string, pct: number) {
@@ -275,37 +289,36 @@ export async function setBudgetAlertPct(userId: string, pct: number) {
 
 // ---------- metas ----------
 
-export async function listGoals(userId: string): Promise<Goal[]> {
-  return ok(await db().from("goals").select("*").eq("user_id", userId).order("created_at").returns<Goal[]>()) ?? [];
+export async function listGoals(u: Member): Promise<Goal[]> {
+  return ok(await household(db().from("goals").select("*"), u).order("created_at").returns<Goal[]>()) ?? [];
 }
 
 export async function insertGoal(g: { user_id: string; name: string; target_amount: number; deadline: string | null; saved_amount: number }) {
   ok(await db().from("goals").insert({ ...g, completed_at: g.saved_amount >= g.target_amount ? new Date().toISOString() : null }));
 }
 
-export async function depositGoal(userId: string, id: string, amount: number) {
-  const g = ok(await db().from("goals").select("*").eq("user_id", userId).eq("id", id).maybeSingle<Goal>());
+export async function depositGoal(u: Member, id: string, amount: number) {
+  const g = ok(await household(db().from("goals").select("*"), u).eq("id", id).maybeSingle<Goal>());
   if (!g) return;
-  ok(await db().from("goal_deposits").insert({ goal_id: id, user_id: userId, amount }));
+  ok(await db().from("goal_deposits").insert({ goal_id: id, user_id: u.id, amount }));
   const saved = Math.max(0, Math.round((Number(g.saved_amount) + amount) * 100) / 100);
   const done = saved >= Number(g.target_amount);
   ok(
     await db()
       .from("goals")
       .update({ saved_amount: saved, completed_at: done ? (g.completed_at ?? new Date().toISOString()) : null })
-      .eq("id", id)
-      .eq("user_id", userId),
+      .eq("id", id),
   );
 }
 
-export async function deleteGoal(userId: string, id: string) {
-  ok(await db().from("goals").delete().eq("user_id", userId).eq("id", id));
+export async function deleteGoal(u: Member, id: string) {
+  ok(await household(db().from("goals").delete(), u).eq("id", id));
 }
 
 // ---------- assinaturas & parcelamentos ----------
 
-export async function listSubscriptions(userId: string): Promise<Subscription[]> {
-  return ok(await db().from("subscriptions").select("*").eq("user_id", userId).eq("active", true).order("billing_day").returns<Subscription[]>()) ?? [];
+export async function listSubscriptions(u: Member): Promise<Subscription[]> {
+  return ok(await household(db().from("subscriptions").select("*"), u).eq("active", true).order("billing_day").returns<Subscription[]>()) ?? [];
 }
 
 /** Cria a assinatura e lança a conta deste mês se o vencimento ainda não passou (mesma regra da API). */
@@ -327,9 +340,9 @@ export async function insertSubscription(user: User, s: Omit<Subscription, "id" 
   }
 }
 
-export async function cancelSubscription(userId: string, id: string, today: string) {
-  ok(await db().from("subscriptions").update({ active: false }).eq("user_id", userId).eq("id", id));
-  ok(await db().from("bills").delete().eq("user_id", userId).eq("subscription_id", id).is("paid_at", null).gt("due_on", today));
+export async function cancelSubscription(u: Member, id: string, today: string) {
+  const sub = ok(await household(db().from("subscriptions").update({ active: false }), u).eq("id", id).select("id").maybeSingle<{ id: string }>());
+  if (sub) ok(await db().from("bills").delete().eq("subscription_id", id).is("paid_at", null).gt("due_on", today));
 }
 
 // ---------- modo casal ----------
@@ -367,39 +380,4 @@ export async function linkPartners(a: string, b: string): Promise<boolean> {
 export async function unlinkPartners(a: string, b: string) {
   ok(await db().from("users").update({ partner_id: null }).eq("id", a).eq("partner_id", b));
   ok(await db().from("users").update({ partner_id: null }).eq("id", b).eq("partner_id", a));
-}
-
-export async function sharedTransactions(userIds: string[], from: string, to: string): Promise<Transaction[]> {
-  return (
-    ok(
-      await db()
-        .from("transactions")
-        .select("*")
-        .in("user_id", userIds)
-        .eq("shared", true)
-        .gte("occurred_on", from)
-        .lte("occurred_on", to)
-        .order("occurred_on", { ascending: false })
-        .returns<Transaction[]>(),
-    ) ?? []
-  );
-}
-
-export async function settlements(a: string, b: string, month: string) {
-  return (
-    ok(
-      await db()
-        .from("couple_settlements")
-        .select("payer_id, receiver_id, amount, created_at")
-        .eq("month", month)
-        .in("payer_id", [a, b])
-        .in("receiver_id", [a, b])
-        .order("created_at", { ascending: false })
-        .returns<{ payer_id: string; receiver_id: string; amount: number; created_at: string }[]>(),
-    ) ?? []
-  );
-}
-
-export async function insertSettlement(s: { payer_id: string; receiver_id: string; amount: number; month: string }) {
-  ok(await db().from("couple_settlements").insert(s));
 }

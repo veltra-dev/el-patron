@@ -1,7 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import type { User } from "@elpatron/shared";
 import { env } from "../config/env.js";
-import { recentMessages, saveMessage } from "../db/index.js";
+import { getUser, recentMessages, saveMessage } from "../db/index.js";
 import { logger } from "../lib/logger.js";
 import { describeNow } from "../lib/time.js";
 import type { Attachment } from "../services/files.js";
@@ -96,7 +96,9 @@ function attachmentBlocks(a: Attachment): Anthropic.Beta.BetaContentBlockParam[]
 }
 
 export async function runAgent(user: User, userText: string, attachment?: Attachment): Promise<string> {
-  const stamped = `[Usuário: ${user.name} | Agora: ${describeNow(user.timezone)}]\n${userText}`;
+  const partner = user.partner_id ? await getUser(user.partner_id) : null;
+  const couple = partner ? ` | Conta conjunta com: ${partner.name}` : "";
+  const stamped = `[Usuário: ${user.name} | Agora: ${describeNow(user.timezone)}${couple}]\n${userText}`;
   const messages: Anthropic.Beta.BetaMessageParam[] = [
     ...(await buildHistory(user.id)),
     {

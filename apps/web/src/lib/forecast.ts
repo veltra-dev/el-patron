@@ -10,10 +10,10 @@ export async function cashForecast(user: User) {
   const from = `${month}-01`;
   const end = dueDateIn(month, 31);
   const [txs, bills, late, subs] = await Promise.all([
-    transactionsBetween(user.id, from, end),
-    listBills(user.id, from, end),
-    overdueBills(user.id, from),
-    listSubscriptions(user.id),
+    transactionsBetween(user, from, end),
+    listBills(user, from, end),
+    overdueBills(user, from),
+    listSubscriptions(user),
   ]);
   const receitas = txs.filter((t) => t.kind === "receita").reduce((s, t) => s + Number(t.amount), 0);
   const despesas = txs.filter((t) => t.kind === "despesa").reduce((s, t) => s + Number(t.amount), 0);

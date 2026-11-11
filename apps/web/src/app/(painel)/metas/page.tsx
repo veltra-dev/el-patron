@@ -26,7 +26,7 @@ function Ring({ pct }: { pct: number }) {
 
 export default async function MetasPage() {
   const user = await requireUser();
-  const goals = await listGoals(user.id);
+  const goals = await listGoals(user);
   const saved = goals.reduce((s, g) => s + Number(g.saved_amount), 0);
   const target = goals.reduce((s, g) => s + Number(g.target_amount), 0);
   const active = goals.filter((g) => !g.completed_at).length;

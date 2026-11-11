@@ -45,8 +45,7 @@ export interface Transaction {
   description: string | null;
   occurred_on: string; // YYYY-MM-DD
   source: "whatsapp" | "importacao" | "web";
-  shared: boolean; // modo casal: dividida com o parceiro
-  partner_share_pct: number; // parte do parceiro (%)
+  personal: boolean; // conta conjunta: só quem lançou enxerga
   created_at: string;
 }
 
@@ -371,26 +370,16 @@ export function forecast(startBalance: number, today: string, end: string, outfl
   return { points, endBalance: balance, zeroOn, totalOut, coverage: totalOut > 0 ? Math.max(0, startBalance) / totalOut : 1 };
 }
 
-// ---------------- modo casal ----------------
+// ---------------- conta conjunta (modo casal) ----------------
 
-type SharedTx = { user_id: string; amount: number | string; shared: boolean; partner_share_pct: number; kind: string };
-type Settlement = { payer_id: string; receiver_id: string; amount: number | string };
+export type Member = Pick<User, "id" | "partner_id">;
 
-/**
- * Quanto o parceiro deve para `me` (negativo: eu devo a ele), considerando as
- * despesas compartilhadas dos dois e os acertos já feitos.
- */
-export function coupleBalance(me: string, partner: string, txs: SharedTx[], settlements: Settlement[] = []) {
-  let owedToMe = 0;
-  for (const t of txs) {
-    if (!t.shared || t.kind !== "despesa") continue;
-    const part = (Number(t.amount) * t.partner_share_pct) / 100;
-    if (t.user_id === me) owedToMe += part;
-    else if (t.user_id === partner) owedToMe -= part;
-  }
-  for (const s of settlements) {
-    if (s.payer_id === partner && s.receiver_id === me) owedToMe -= Number(s.amount);
-    else if (s.payer_id === me && s.receiver_id === partner) owedToMe += Number(s.amount);
-  }
-  return Math.round(owedToMe * 100) / 100;
+/** Donos dos dados que o usuário enxerga: ele e, no modo casal, o parceiro. */
+export function householdIds(u: Member): string[] {
+  return u.partner_id ? [u.id, u.partner_id] : [u.id];
+}
+
+/** Dono dos dados únicos da casa (orçamentos e avisos): sempre o mesmo para os dois. */
+export function householdKey(u: Member): string {
+  return householdIds(u).sort()[0]!;
 }

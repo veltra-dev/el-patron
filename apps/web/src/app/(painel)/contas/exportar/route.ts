@@ -12,7 +12,7 @@ export async function GET(req: Request) {
   const current = currentMonth(user.timezone);
   const month = isValidMonth(mes) ? mes : current;
   const { from, to } = monthRange(month);
-  const [bills, late] = await Promise.all([listBills(user.id, from, to), month === current ? overdueBills(user.id, from) : Promise.resolve([])]);
+  const [bills, late] = await Promise.all([listBills(user, from, to), month === current ? overdueBills(user, from) : Promise.resolve([])]);
   const lines = [
     ["Conta", "Categoria", "Vencimento", "Valor", "Situação"].join(";"),
     ...[...late, ...bills].map((b) =>
